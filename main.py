@@ -44,13 +44,8 @@ async def albums_handler(event):
             media_group.add(type='photo',
                             media=types.FSInputFile(path=filename),
                             parse_mode=ParseMode.HTML)
-        elif utils.is_gif(filename):
-            await bot.send_animation(chat_id=users[0],
-                                     animation=types.FSInputFile(path=filename),
-                                     caption=f'{event.raw_text}',
-                                     parse_mode=ParseMode.HTML)
-
-    await bot.send_media_group(chat_id=users[0], media=media_group.build())
+    for user in users:
+        await bot.send_media_group(chat_id=user, media=media_group.build())
     remove_file(filename_list)
 
 
@@ -63,24 +58,26 @@ async def my_event_handler(event):
             # Отправка группы фото и текста в одном сообщении
             # TODO @INCLUDE: В telethon нет поддержки
             if utils.is_video(filename):
-                await bot.send_video(chat_id=users[0],
-                                     video=types.FSInputFile(path=filename),
-                                     caption=f'{event.raw_text}',
-                                     parse_mode=ParseMode.HTML)
-            elif utils.is_image(filename):
-                await bot.send_photo(chat_id=users[0],
-                                     photo=types.FSInputFile(path=filename),
-                                     caption=f'{event.raw_text}',
-                                     parse_mode=ParseMode.HTML)
-            elif utils.is_gif(filename):
-                await bot.send_animation(chat_id=users[0],
-                                         animation=types.FSInputFile(path=filename),
-                                         caption=f'{event.raw_text}',
+                for user in users:
+                    await bot.send_video(chat_id=user,
+                                         video=types.FSInputFile(path=filename),
+                                         caption=f'{event.text}',
                                          parse_mode=ParseMode.HTML)
+            elif utils.is_image(filename):
+                for user in users:
+                    await bot.send_photo(chat_id=user,
+                                         photo=types.FSInputFile(path=filename),
+                                         caption=f'{event.text}',
+                                         parse_mode=ParseMode.HTML)
+            elif utils.is_gif(filename):
+                for user in users:
+                    await bot.send_animation(chat_id=user,
+                                             animation=types.FSInputFile(path=filename),
+                                             caption=f'{event.text}',
+                                             parse_mode=ParseMode.HTML)
             remove_file(filename)
     else:
         # Отправка только текста, если медиафайлов нет
-        # await bot.send_message(chat_id=users[0], text=f'{event.raw_text}')
         for user in users:
             await bot.send_message(chat_id=user,
                                    text=f'{event.text}',
