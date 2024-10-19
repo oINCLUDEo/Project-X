@@ -1,9 +1,11 @@
 import psycopg2
+import logging
 import os
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения из файла .env
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 # Получение значений переменных окружения
 DB_NAME = os.getenv('DB_NAME')
@@ -104,7 +106,6 @@ def add_user(user_id):
             with conn.cursor() as cur:
                 cur.execute(query, (user_id,))
 
-        return "Пользователь успешно добавлен!"
-    except psycopg2.IntegrityError as e:
-
-        return f"Ошибка уникальности: {e}"
+        logger.info("Пользователь успешно добавлен!")
+    except psycopg2.IntegrityError:
+        logger.exception("Ошибка уникальности:")

@@ -11,8 +11,23 @@ from aiogram.filters import CommandStart
 from telethon import TelegramClient, events, utils
 from dotenv import load_dotenv
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, filename="tgnews.log", filemode="w")
+# Настраиваем базовую конфигурацию логирования
+logging.basicConfig(level=logging.INFO,
+                    format='{asctime} [{levelname:8}]: {filename} {name}- {message}',
+                    style='{',
+                    filename='tgnews.log',
+                    filemode='w')
+# Инициализируем логгер модуля
+logger = logging.getLogger(__name__)
+# Инициализируем хэндлер
+stdout = logging.StreamHandler()
+# Инициализируем форматтер
+formatter = logging.Formatter('{asctime} [{levelname:8}]: {filename} {name}  {message}', style='{')
+# Определяем форматирование логов в хэндлере
+stdout.setFormatter(formatter)
+# Добавляем хэндлер в логгер
+logger.addHandler(stdout)
+
 
 # Загрузка переменных окружения из файла .env
 load_dotenv()
@@ -97,29 +112,29 @@ async def my_event_handler(event):
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    print(add_user(message.from_user.id))
+    add_user(message.from_user.id)
+    pass
 
 
 async def start_telethon():
     client.parse_mode = 'html'
     await client.start()
-    print("Channels parser started")
-    logging.info("Парсер новостных каналов успешно запущен")
+    logger.info("Парсер новостных каналов успешно запущен")
     await client.run_until_disconnected()
 
 
 async def start_aiogram():
-    print("Bot started")
-    logging.info("Бот успешно запущен")
+    logger.info("Бот успешно запущен")
     await dp.start_polling(bot)
 
 
 async def main():
     await asyncio.gather(start_telethon(), start_aiogram())
 
+
 # Асинхронный запуск работает, но стоило бы рассмотреть подробнее его работу.
 # Фрагменты кода функций запуска взяты из GPT
-
+# TODO: Надо расстащить куски аиограм и телетон в два модуля оставив тут мейн
 if __name__ == '__main__':
     try:
         # Создание цикла событий
