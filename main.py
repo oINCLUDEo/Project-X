@@ -1,6 +1,8 @@
 import os
 import asyncio
 import logging
+import logging.config
+import yaml
 from helpers import remove_file
 from db_connection import *
 
@@ -11,29 +13,21 @@ from aiogram.filters import CommandStart
 from telethon import TelegramClient, events, utils
 from dotenv import load_dotenv
 
-# Настраиваем базовую конфигурацию логирования
-logging.basicConfig(level=logging.INFO,
-                    format='{asctime} [{levelname:8}]: {filename} {name}- {message}',
-                    style='{',
-                    filename='tgnews.log',
-                    filemode='w')
+#logging.basicConfig(level=logging.INFO,
+#                    format='{asctime} [{levelname:8}]: {filename} {name}- {message}',
+#                    style='{',
+#                    filename='tgnews.log',
+#                    filemode='w')
 # Инициализируем логгер модуля
-logger = logging.getLogger(__name__)
-# Инициализируем хэндлер
-stdout = logging.StreamHandler()
-# Инициализируем форматтер
-formatter = logging.Formatter('{asctime} [{levelname:8}]: {filename} {name}  {message}', style='{')
-# Определяем форматирование логов в хэндлере
-stdout.setFormatter(formatter)
-# Добавляем хэндлер в логгер
-logger.addHandler(stdout)
-
-
+#logger = logging.getLogger(__name__)
 # Загрузка переменных окружения из файла .env
 load_dotenv()
 api_id = int(os.getenv('API_ID'))
 api_hash = os.getenv('API_HASH')
 bot_token = os.getenv('BOT_TOKEN')
+
+#logger.info("Переменные окружения загружены", api_id, api_hash, bot_token)
+
 
 # Создание бота, диспетчера и клиента
 bot = Bot(token=bot_token)
@@ -113,7 +107,6 @@ async def my_event_handler(event):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     add_user(message.from_user.id)
-    pass
 
 
 async def start_telethon():
@@ -136,6 +129,11 @@ async def main():
 # Фрагменты кода функций запуска взяты из GPT
 # TODO: Надо расстащить куски аиограм и телетон в два модуля оставив тут мейн
 if __name__ == '__main__':
+    # Подключаем словарь конфигурации логирования
+    with open('logs_settings.yaml', 'rt') as f:
+        config = yaml.safe_load(f.read())
+    logging.config.dictConfig(config)
+    logger = logging.getLogger(__name__)
     try:
         # Создание цикла событий
         loop = asyncio.new_event_loop()
@@ -144,6 +142,6 @@ if __name__ == '__main__':
         # Запуск основной функции в текущем цикле событий
         loop.run_until_complete(main())
     except KeyboardInterrupt:
-        logging.info("Выполнение скрипта прервано пользователем.")
+        logger.info("Выполнение скрипта прервано пользователем.")
     finally:
-        logging.info("Завершение работы скрипта.")
+        logger.info("Завершение работы скрипта.")

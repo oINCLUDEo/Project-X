@@ -29,6 +29,7 @@ def get_users():
             cur.execute(query)
             users = [user[0] for user in cur.fetchall()]
 
+            logger.info("Возвращен список пользователей")
             return users
 
 
@@ -46,6 +47,7 @@ def get_channels():
             cur.execute(query)
             channels = [channel[0] for channel in cur.fetchall()]
 
+            logger.info("Возвращен список каналов")
             return channels
 
 
@@ -68,6 +70,7 @@ def get_category_users(category_id):
             cur.execute(query, (category_id,))
             users = [user[0] for user in cur.fetchall()]
 
+            logger.info("Возвращен список пользователей, имеющих category_id")
             return users
 
 
@@ -89,6 +92,7 @@ def get_channel_category(channel_tg_id):
             cur.execute(query, (channel_tg_id,))
             categories = [category[0] for category in cur.fetchall()]
 
+            logger.info("Возвращен список категорий канала channel_tg_id")
             return categories
 
 
