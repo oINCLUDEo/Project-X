@@ -19,7 +19,7 @@ handlers:
 
   file:
     class: logging.FileHandler
-    filename: tgnews.log
+    filename: logs/tgnews.log
     mode: w
     formatter: default
 

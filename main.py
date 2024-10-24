@@ -1,38 +1,31 @@
-import os
 import asyncio
-import logging
 import logging.config
 import yaml
-from helpers import remove_file
-from db_connection import *
+from config.config import load_config
+from helpers.helpers import remove_file
+from database.db_connection import *
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from telethon import TelegramClient, events, utils
-from dotenv import load_dotenv
 
-#logging.basicConfig(level=logging.INFO,
-#                    format='{asctime} [{levelname:8}]: {filename} {name}- {message}',
-#                    style='{',
-#                    filename='tgnews.log',
-#                    filemode='w')
-# Инициализируем логгер модуля
-#logger = logging.getLogger(__name__)
-# Загрузка переменных окружения из файла .env
-load_dotenv()
-api_id = int(os.getenv('API_ID'))
-api_hash = os.getenv('API_HASH')
-bot_token = os.getenv('BOT_TOKEN')
+config = load_config()  # Загрузка config.py
 
-#logger.info("Переменные окружения загружены", api_id, api_hash, bot_token)
-
+# Получаем путь к корневой директории проекта
+root_dir = os.path.dirname(os.path.abspath(__file__))
+# Путь к YAML-файлу с конфигурацией логирования
+config_path = os.path.join(root_dir, 'config/logs_settings.yaml')
 
 # Создание бота, диспетчера и клиента
-bot = Bot(token=bot_token)
+bot = Bot(token=config.aiogram_bot.token)
 dp = Dispatcher()
-client = TelegramClient('news_parser', api_id, api_hash)
+client = TelegramClient(
+    session='news_parser',
+    api_id=config.telethon_client.api_id,
+    api_hash=config.telethon_client.api_hash
+)
 
 users = get_users()
 channels = get_channels()
@@ -125,12 +118,10 @@ async def main():
     await asyncio.gather(start_telethon(), start_aiogram())
 
 
-# Асинхронный запуск работает, но стоило бы рассмотреть подробнее его работу.
-# Фрагменты кода функций запуска взяты из GPT
 # TODO: Надо расстащить куски аиограм и телетон в два модуля оставив тут мейн
 if __name__ == '__main__':
     # Подключаем словарь конфигурации логирования
-    with open('logs_settings.yaml', 'rt') as f:
+    with open('config/logs_settings.yaml', 'rt') as f:
         config = yaml.safe_load(f.read())
     logging.config.dictConfig(config)
     logger = logging.getLogger(__name__)
