@@ -1,33 +1,28 @@
 import asyncio
 import logging.config
 import yaml
-from config.config import load_config
 from helpers.helpers import remove_file
+from config.config import load_config
 from database.db_connection import *
+from aiogram_bot.handlers import user_handlers
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
 from telethon import TelegramClient, events, utils
 
 config = load_config()  # Загрузка config.py
 
-# Получаем путь к корневой директории проекта
-root_dir = os.path.dirname(os.path.abspath(__file__))
-# Путь к YAML-файлу с конфигурацией логирования
-config_path = os.path.join(root_dir, 'config/logs_settings.yaml')
-
 # Создание бота, диспетчера и клиента
 bot = Bot(token=config.aiogram_bot.token)
 dp = Dispatcher()
+dp.include_router(user_handlers.router)
 client = TelegramClient(
     session='news_parser',
     api_id=config.telethon_client.api_id,
     api_hash=config.telethon_client.api_hash
 )
 
-users = get_users()
 channels = get_channels()
 
 
@@ -63,6 +58,7 @@ async def my_event_handler(event):
     if event.media:
         if not event.grouped_id:
             msg_from_channel_id = (await event.get_sender()).id
+            # TODO: Можно оптимизировать получая объединив в один sql-запрос get_category_users & get_channel_category
             target_users = get_category_users(tuple(get_channel_category(msg_from_channel_id)))
 
             filename = await event.download_media()
@@ -97,11 +93,6 @@ async def my_event_handler(event):
                                    parse_mode=ParseMode.HTML)
 
 
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    add_user(message.from_user.id)
-
-
 async def start_telethon():
     client.parse_mode = 'html'
     await client.start()
@@ -111,6 +102,7 @@ async def start_telethon():
 
 async def start_aiogram():
     logger.info("Бот успешно запущен")
+    await bot.delete_webhook(drop_pending_updates=True) # Дроп накопившихся за время отсутствия бота в сети, апдейты
     await dp.start_polling(bot)
 
 
@@ -122,8 +114,8 @@ async def main():
 if __name__ == '__main__':
     # Подключаем словарь конфигурации логирования
     with open('config/logs_settings.yaml', 'rt') as f:
-        config = yaml.safe_load(f.read())
-    logging.config.dictConfig(config)
+        log_config = yaml.safe_load(f.read())
+    logging.config.dictConfig(log_config)
     logger = logging.getLogger(__name__)
     try:
         # Создание цикла событий

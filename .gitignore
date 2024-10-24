@@ -1,3 +1,6 @@
 /.env
 /.idea
 /news_parser.session
+/test.py
+/logs/tgnews.log
+/todo.txt

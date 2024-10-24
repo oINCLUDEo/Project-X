@@ -2,7 +2,7 @@ version: 1
 
 formatters:
   default:
-    format: '%(asctime)s [%(levelname)-8s]: %(filename)s %(name)s  %(message)s'
+    format: '%(asctime)s [%(levelname)-8s]: %(name)s  %(message)s'
 
 handlers:
   default:
@@ -24,12 +24,12 @@ handlers:
     formatter: default
 
 loggers:
-  db_connection:
-    level: DEBUG
-    handlers: [file]
+  database.db_connection:
+    level: INFO
+    handlers: [default]
 
   __main__:
-    level: INFO
+    level: DEBUG
     handlers: [default]
 
 root:
