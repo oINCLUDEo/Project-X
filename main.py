@@ -34,7 +34,7 @@ async def start_telethon():
     setup_handlers(client, channels)
 
     logger.info("Авторизация в аккаунт")
-    client.start(password=config.telethon_client.password)
+    await client.start(password=config.telethon_client.password)
 
     logger.info("Авторизация успешна")
     logger.info("Парсер новостных каналов успешно запущен")

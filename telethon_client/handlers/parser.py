@@ -1,5 +1,6 @@
 from database.db_connection import *
 from helpers.helpers import remove_file
+from AI.Ai_Functions import classify_post
 
 from aiogram import types
 from telethon import utils
@@ -37,6 +38,7 @@ async def album_handler(event):
 
 # Обработчик для обычных сообщений
 async def default_handler(event):
+    post_categories = classify_post(event.text)["labels"][0]
     # Проверка наличия медиафайлов в сообщении
     if event.media:
         if not event.grouped_id:
@@ -71,5 +73,5 @@ async def default_handler(event):
         # Отправка только текста, если медиафайлов нет
         for user in target_users:
             await bot.send_message(chat_id=user,
-                                   text=f'{event.text}',
+                                   text=f'Пост имеет категорию - {post_categories}\n {event.text}',
                                    parse_mode=ParseMode.HTML)
