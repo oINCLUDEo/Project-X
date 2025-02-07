@@ -20,7 +20,8 @@ class AiogramBot:
 @dataclass
 class TelethonClient:
     api_id: int            # API-ID для доступа к клиенту(парсеру) через API
-    api_hash: str            # API-Hash для доступа к клиенту(парсеру) через API
+    api_hash: str           # API-Hash для доступа к клиенту(парсеру) через API
+    password: str           # Пароль от Telegram аккаунта с которого парсятся паблики
 
 
 @dataclass
@@ -39,7 +40,8 @@ def load_config() -> Config:
         ),
         telethon_client=TelethonClient(
             api_id=int(os.getenv('API_ID')),
-            api_hash=os.getenv('API_HASH')
+            api_hash=os.getenv('API_HASH'),
+            password=os.getenv('TG_ACCOUNT_PARSER_PASSWORD')
         ),
         db=DatabaseConfig(
             db_name=os.getenv('DB_NAME'),

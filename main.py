@@ -16,17 +16,27 @@ bot = Bot(token=config.aiogram_bot.token)
 dp = Dispatcher()
 
 async def start_telethon():
+    # Инициализация Telethon Клиента
     client = TelegramClient(
         session='news_parser',
+        device_model="iPhone 13 Pro Max",
+        system_version="14.8.1",
+        app_version="8.4",
         api_id=config.telethon_client.api_id,
         api_hash=config.telethon_client.api_hash
     )
     client.parse_mode = 'html'
     channels = get_channels() # Загрузка каналов для прослушивания
+
     set_bot(bot)
+
     # Загрузка обработчиков
     setup_handlers(client, channels)
-    await client.start()
+
+    logger.info("Авторизация в аккаунт")
+    client.start(password=config.telethon_client.password)
+
+    logger.info("Авторизация успешна")
     logger.info("Парсер новостных каналов успешно запущен")
     await client.run_until_disconnected()
 
@@ -41,7 +51,7 @@ async def start_aiogram():
 
 
 async def main():
-    await asyncio.gather(start_telethon(), start_aiogram())
+    await asyncio.gather(start_telethon(), start_aiogram()) # Запуск Бота и Телеграм Парсера асинхронно
 
 
 # TODO: Надо расстащить куски аиограм и телетон в два модуля оставив тут мейн
