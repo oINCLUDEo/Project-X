@@ -5,6 +5,7 @@ from config.config import load_config
 __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_user']
 logger = logging.getLogger(__name__)
 config = load_config()
+
 def _get_db_connection():
     """
     Возвращает подключение к базе данных.
@@ -37,22 +38,52 @@ def get_channels():
             logger.info("Возвращен список каналов")
             return channels
 
-def get_category_users(category_id):
+def get_category_users(category_ids):
+    """
+    Получает список пользователей, подписанных на указанные категории.
+    
+    Args:
+        category_ids: Кортеж ID категорий
+        
+    Returns:
+        list[int]: Список Telegram ID пользователей
+    """
+    if not category_ids:
+        logger.warning("Передан пустой список категорий")
+        return []
+    
+    # Преобразуем в список, если передан кортеж
+    category_ids = list(category_ids)
+
     query = """
-            SELECT user_tg_id FROM users u 
+            SELECT DISTINCT u.user_tg_id 
+            FROM users u 
             JOIN user_categories uc ON u.user_id = uc.user_id 
-            WHERE uc.category_id IN %s
-            GROUP BY user_tg_id;
+            WHERE uc.category_id = ANY(%s)
+            AND u.is_active = TRUE;
             """
-    with _get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (category_id,))
-            users = [user[0] for user in cur.fetchall()]
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Передаем список как массив
+                cur.execute(query, (category_ids,))
+                users = [user[0] for user in cur.fetchall()]
+                logger.info("Найдено %d пользователей для категорий %s", len(users), category_ids)
+                return users
+    except Exception as e:
+        logger.error("Ошибка при получении пользователей для категорий %s: %s", category_ids, str(e))
+        return []
 
-            logger.info("Возвращен список пользователей, имеющих category_id")
-            return users
-
-def get_channel_category(channel_tg_id):
+def get_channel_category(channel_tg_id: int) -> list[int]:
+    """
+    Получает список категорий канала.
+    
+    Args:
+        channel_tg_id: Telegram ID канала
+        
+    Returns:
+        list[int]: Список ID категорий
+    """
     query = """
             SELECT category_id FROM channel_categories cc
             JOIN channels c ON c.channel_id = cc.channel_id
@@ -62,8 +93,7 @@ def get_channel_category(channel_tg_id):
         with conn.cursor() as cur:
             cur.execute(query, (channel_tg_id,))
             categories = [category[0] for category in cur.fetchall()]
-
-            logger.info("Возвращен список категорий канала channel_tg_id")
+            logger.info("Получены категории %s для канала %s", categories, channel_tg_id)
             return categories
 
 def add_user(user_tg_id):

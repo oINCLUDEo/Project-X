@@ -21,21 +21,19 @@ async def start_telethon():
         session='news_parser',
         device_model="iPhone 13 Pro Max",
         system_version="14.8.1",
-        app_version="8.4",
+        app_version="10.1",
         api_id=config.telethon_client.api_id,
         api_hash=config.telethon_client.api_hash
     )
     client.parse_mode = 'html'
     channels = get_channels() # Загрузка каналов для прослушивания
-
+    logger.debug("Список каналов: %s", channels)
     set_bot(bot)
 
     # Загрузка обработчиков
     setup_handlers(client, channels)
-
     logger.info("Авторизация в аккаунт")
     await client.start(password=config.telethon_client.password)
-
     logger.info("Авторизация успешна")
     logger.info("Парсер новостных каналов успешно запущен")
     await client.run_until_disconnected()
