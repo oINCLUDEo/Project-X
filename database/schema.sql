@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS user_categories (
 
 -- Создание таблицы связи каналов с категориями
 CREATE TABLE IF NOT EXISTS channel_categories (
-    channel_id INTEGER REFERENCES channels(channel_id),
-    category_id INTEGER REFERENCES categories(category_id),
+	channel_id INTEGER REFERENCES channels(channel_id) ON DELETE CASCADE,
+	category_id INTEGER REFERENCES categories(category_id),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (channel_id, category_id)
 );
@@ -80,14 +80,16 @@ CREATE INDEX IF NOT EXISTS idx_user_news_is_read ON user_news(is_read);
 CREATE INDEX IF NOT EXISTS idx_channels_is_active ON channels(is_active);
 CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
 
--- Добавление базовых категорий
+-- Добавление категорий примера
+-- TODO: Категории должны добавляться парсингом с tgstat.ru
 INSERT INTO categories (name, description) VALUES
-    ('Политика', 'Новости политики и государственного управления'),
-    ('Экономика', 'Новости экономики и финансов'),
-    ('Технологии', 'Новости технологий и инноваций'),
-    ('Спорт', 'Спортивные новости и события'),
-    ('Культура', 'Новости культуры и искусства'),
-    ('Наука', 'Научные открытия и исследования'),
-    ('Общество', 'Новости общественной жизни'),
-    ('Происшествия', 'Новости о происшествиях и чрезвычайных ситуациях')
+    ('Ульяновск', 'Тестовая категория для ульяновска'),
+    ('Политика', 'Тестовая категория Новости политики и государственного управления'),
+    ('Экономика', 'Тестовая категория Новости экономики и финансов'),
+    ('Технологии', 'Тестовая категория Новости технологий и инноваций'),
+    ('Спорт', 'Тестовая категория Спортивные новости и события'),
+    ('Культура', 'Тестовая категория Новости культуры и искусства'),
+    ('Наука', 'Тестовая категория Научные открытия и исследования'),
+    ('Общество', 'Тестовая категория Новости общественной жизни'),
+    ('Происшествия', 'Тестовая категория Новости о происшествиях и чрезвычайных ситуациях')
 ON CONFLICT (name) DO NOTHING; 
