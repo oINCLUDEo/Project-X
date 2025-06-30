@@ -5,3 +5,5 @@
 /logs/tgnews.log
 /todo.txt
 /.venv/
+/news_parser.session-journal
+/scripts/tgstat_parser.session

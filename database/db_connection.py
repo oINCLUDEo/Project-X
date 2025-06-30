@@ -247,3 +247,37 @@ def update_channel_info(channel_tg_id: int, username: str = None, title: str = N
     except Exception as e:
         logger.error(f"Ошибка при обновлении информации о канале {channel_tg_id}: {str(e)}")
         raise
+
+
+def add_post(channel_tg_id: int, content: str, embedding: list[float]):
+    """
+    Добавляет новость с эмбеддингом в базу данных.
+    """
+    query = """
+        INSERT INTO posts (channel_tg_id, content, embedding)
+        VALUES (%s, %s, %s)
+        RETURNING post_id;
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (
+                    channel_tg_id,
+                    content,
+                    embedding
+                ))
+                post_id = cur.fetchone()[0]
+                logger.info(f"Новость успешно добавлена с ID {post_id}")
+                return post_id
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении новости: {str(e)}")
+        raise
+
+
+def get_latest_embeddings(limit=100):
+    query = "SELECT embedding FROM posts LIMIT %s"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (limit,))
+            rows = cur.fetchall()
+    return rows
