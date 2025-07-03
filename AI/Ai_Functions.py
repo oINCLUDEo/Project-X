@@ -2,23 +2,20 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from database.db_connection import get_latest_embeddings
-
 # classifier = pipeline("zero-shot-classification", model="joeddav/xlm-roberta-large-xnli")
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
-# Функция для генерации эмбеддингов
-def get_embedding(text: str):
+def get_embedding(text: str) -> list[float]:
+    """
+    Генерирует эмбеддинг для переданного текста.
+    """
     return embedding_model.encode([text])[0]
 
 
-def is_similar_to_existing(new_emb: str):
-    max_similarity = 0
-    for old_emb in get_latest_embeddings(100):
-        similarity = cosine_similarity([np.array(new_emb).reshape(-1)],
-                                       [np.array(old_emb).reshape(-1)])
-        if max_similarity < similarity:
-            max_similarity = similarity
-        if max_similarity > 0.74:
-            return True, max_similarity # Отправляем информацию, что посты схожи
-    return False, max_similarity
+def get_similarity(emb1: list[float], emb2: list[float]) -> float:
+    """
+    Вычисляет косинусное сходство между двумя эмбеддингами.
+    """
+    emb1 = np.array(emb1).reshape(1, -1)
+    emb2 = np.array(emb2).reshape(1, -1)
+    return float(cosine_similarity(emb1, emb2)[0][0])

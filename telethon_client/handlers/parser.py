@@ -1,6 +1,7 @@
 import logging
 
-from AI.Ai_Functions import get_embedding, is_similar_to_existing
+from AI.Ai_Functions import get_embedding
+from AI.clustering import process_post_and_cluster
 from aiogram_bot.keyboards import get_feedback_keyboard
 from database.db_connection import *
 from database.db_connection import add_post
@@ -70,16 +71,6 @@ async def default_handler(event):
     message_text = event.message.text
     # Получаем ID канала
     msg_from_channel_id = event.peer_id.channel_id
-    # Записываем в БД эмбеддинг и проверяем на схожесть пост
-    text_encoding = get_embedding(message_text)
-    if text_encoding is not None:
-        is_similar, similarity_percent = is_similar_to_existing(text_encoding)
-        if not is_similar:
-            logger.info("Схожесть поста меньше порогового значения, считается уникальным. Процент схожести: %s", similarity_percent)
-            add_post(msg_from_channel_id, message_text, text_encoding.tolist())
-        else:
-            logger.info("Данный пост схож с существующим в БД. Процент схожести: %s", similarity_percent)
-            return
     # Получаем категории канала
     channel_categories = get_channel_category(msg_from_channel_id)
     logger.info("ID канала: %s, Категории канала: %s", msg_from_channel_id, channel_categories)
@@ -146,3 +137,13 @@ async def default_handler(event):
                 logger.info("Текстовое сообщение отправлено пользователю %s", user)
             except Exception as e:
                 logger.error("Ошибка отправки текстового сообщения пользователю %s: %s", user, str(e))
+
+    # ⬇️ AI обработка + кластеризация
+    try:
+        embedding = get_embedding(message_text)
+        post_id = add_post(msg_from_channel_id, message_text, embedding.tolist())
+
+        clustering_result = process_post_and_cluster(msg_from_channel_id, message_text, post_id)
+        logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})")
+    except Exception as e:
+        logger.error(f"Ошибка при обработке AI/кластеризации: {str(e)}")

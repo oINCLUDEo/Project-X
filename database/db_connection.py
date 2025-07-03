@@ -274,10 +274,38 @@ def add_post(channel_tg_id: int, content: str, embedding: list[float]):
         raise
 
 
-def get_latest_embeddings(limit=100):
-    query = "SELECT embedding FROM posts LIMIT %s"
+def create_new_cluster(main_post_id: int, lifetime_minutes=1440) -> int:
+    query = """
+        INSERT INTO clusters (main_post_id, lifetime_minutes)
+        VALUES (%s, %s)
+        RETURNING cluster_id;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (main_post_id, lifetime_minutes))
+            return cur.fetchone()[0]
+
+
+def add_post_to_cluster(cluster_id: int, post_id: int):
+    query = """
+        INSERT INTO cluster_posts (cluster_id, post_id)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id, post_id))
+
+
+def get_recent_clusters_with_embeddings(limit=50) -> list[tuple[int, list[float]]]:
+    query = """
+        SELECT c.cluster_id, p.embedding
+        FROM clusters c
+        JOIN posts p ON c.main_post_id = p.post_id
+        ORDER BY c.created_at DESC
+        LIMIT %s;
+    """
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(query, (limit,))
-            rows = cur.fetchall()
-    return rows
+            return [(row[0], row[1]) for row in cur.fetchall()]
