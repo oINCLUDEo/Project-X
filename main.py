@@ -3,7 +3,6 @@ import logging.config
 import yaml
 from config.config import load_config
 from database.db_connection import *
-from telethon_client.handlers.parser import set_bot
 from telethon_client.start_telethon import setup_handlers
 from aiogram_bot.handlers import user_handlers
 
@@ -28,10 +27,9 @@ async def start_telethon():
     client.parse_mode = 'html'
     channels = get_channels() # Загрузка каналов для прослушивания
     logger.debug("Список каналов: %s", channels)
-    set_bot(bot)
 
     # Загрузка обработчиков
-    setup_handlers(client, channels)
+    setup_handlers(client, channels, bot)
     logger.info("Авторизация в аккаунт")
     await client.start(password=config.telethon_client.password)
     logger.info("Авторизация успешна")

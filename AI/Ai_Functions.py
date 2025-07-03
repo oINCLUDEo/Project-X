@@ -3,7 +3,8 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # classifier = pipeline("zero-shot-classification", model="joeddav/xlm-roberta-large-xnli")
-embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+# embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+embedding_model = SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
 
 def get_embedding(text: str) -> list[float]:
     """
