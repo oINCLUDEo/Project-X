@@ -5,6 +5,8 @@ from config.config import load_config
 from database.db_connection import *
 from telethon_client.start_telethon import setup_handlers
 from aiogram_bot.handlers import user_handlers
+from telethon_client.handlers.handler_utils import cluster_publisher_task
+from database.db_connection import get_category_users, get_channel_category
 
 from aiogram import Bot, Dispatcher
 from telethon import TelegramClient
@@ -13,6 +15,10 @@ config = load_config()  # Загрузка config.py
 
 bot = Bot(token=config.aiogram_bot.token)
 dp = Dispatcher()
+
+def get_users_for_post(channel_tg_id):
+    categories = get_channel_category(channel_tg_id)
+    return get_category_users(tuple(categories))
 
 async def start_telethon():
     # Инициализация Telethon Клиента
@@ -47,7 +53,8 @@ async def start_aiogram():
 
 
 async def main():
-    await asyncio.gather(start_telethon(), start_aiogram()) # Запуск Бота и Телеграм Парсера асинхронно
+    publisher = asyncio.create_task(cluster_publisher_task(bot, bot.send_message, get_users_for_post))
+    await asyncio.gather(start_telethon(), start_aiogram(), publisher) # Запуск Бота, Телеграм Парсера и публикации кластеров асинхронно
 
 
 # TODO: Надо расстащить куски аиограм и телетон в два модуля оставив тут мейн

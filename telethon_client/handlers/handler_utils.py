@@ -1,8 +1,9 @@
 import logging
 from telethon import utils
-from database.db_connection import get_channel_category, get_category_users, add_post
+from database.db_connection import get_channel_category, get_category_users, add_post, get_expired_clusters, get_main_post_for_cluster, delete_cluster
 from AI.Ai_Functions import get_embedding
 from AI.clustering import process_post_and_cluster
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -42,4 +43,30 @@ def process_ai_and_clustering(msg_from_channel_id, message_text):
     embedding = get_embedding(message_text)
     post_id = add_post(msg_from_channel_id, message_text, embedding.tolist())
     clustering_result = process_post_and_cluster(msg_from_channel_id, message_text, post_id)
-    logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})") 
+    logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})")
+
+# --- Фоновый таск публикации главных новостей кластеров ---
+async def cluster_publisher_task(bot, send_func, get_users_for_post, interval=30):
+    """
+    Периодически ищет истёкшие кластеры, отправляет главный пост пользователям и удаляет кластер.
+    :param bot: объект бота
+    :param send_func: функция отправки (например, bot.send_message)
+    :param get_users_for_post: функция, возвращающая список пользователей для поста
+    :param interval: интервал проверки в секундах
+    """
+    while True:
+        expired_clusters = get_expired_clusters()
+        for cluster_id, main_post_id in expired_clusters:
+            main_post = get_main_post_for_cluster(cluster_id)
+            if main_post:
+                # main_post: (post_id, channel_tg_id, content, embedding, media_urls, published_at, created_at, is_hot, views_count)
+                channel_tg_id = main_post[1]
+                content = main_post[2]
+                # Получаем пользователей для рассылки (можно доработать под ваши нужды)
+                users = get_users_for_post(channel_tg_id)
+                if users:
+                    await send_to_users(bot, users, send_func, text=content)
+                    logger.info(f"Главная новость кластера {cluster_id} отправлена {len(users)} пользователям")
+            delete_cluster(cluster_id)
+            logger.info(f"Кластер {cluster_id} удалён после публикации")
+        await asyncio.sleep(interval) 

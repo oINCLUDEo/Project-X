@@ -5,7 +5,7 @@ from aiogram.utils.media_group import MediaGroupBuilder
 from telethon import utils
 from helpers.helpers import remove_file
 from aiogram_bot.keyboards import get_feedback_keyboard
-from handler_utils import send_to_users, validate_post
+from telethon_client.handlers.handler_utils import validate_post
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,10 @@ async def album_handler(event, bot):
             media_group.add(type='photo',
                             media=types.FSInputFile(path=filename),
                             parse_mode=ParseMode.HTML)
-
     try:
-        await send_to_users(
-            bot, target_users, bot.send_media_group,
-            media=media_group.build()
-        )
+        # Здесь можно добавить сохранение информации о медиа-альбоме в БД, если нужно
+        pass  # Не отправляем пользователям!
     except Exception as e:
-        logger.error("Ошибка отправки альбома: %s", str(e))
+        logger.error("Ошибка обработки альбома: %s", str(e))
     finally:
         remove_file(filename_list) 

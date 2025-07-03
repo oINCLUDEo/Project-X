@@ -1,8 +1,11 @@
 import psycopg2
 import logging
 from config.config import load_config
+from datetime import datetime
 
-__all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_user', 'add_channel', 'update_channel_info']
+__all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_user', 'add_channel', 'update_channel_info',
+           'add_post', 'create_new_cluster', 'add_post_to_cluster', 'get_recent_clusters_with_embeddings',
+           'get_expired_clusters', 'get_main_post_for_cluster', 'delete_cluster']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -309,3 +312,40 @@ def get_recent_clusters_with_embeddings(limit=50) -> list[tuple[int, list[float]
         with conn.cursor() as cur:
             cur.execute(query, (limit,))
             return [(row[0], row[1]) for row in cur.fetchall()]
+
+def get_expired_clusters():
+    """
+    Возвращает список кластеров, у которых истёк срок жизни (expires_at < now()).
+    """
+    query = """
+        SELECT cluster_id, main_post_id FROM clusters
+        WHERE expires_at < NOW()
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()  # [(cluster_id, main_post_id), ...]
+
+def get_main_post_for_cluster(cluster_id):
+    """
+    Возвращает данные главного поста для кластера.
+    """
+    query = """
+        SELECT p.* FROM posts p
+        JOIN clusters c ON c.main_post_id = p.post_id
+        WHERE c.cluster_id = %s
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id,))
+            return cur.fetchone()  # row or None
+
+def delete_cluster(cluster_id):
+    """
+    Удаляет кластер и связанные с ним записи (ON DELETE CASCADE).
+    """
+    query = "DELETE FROM clusters WHERE cluster_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id,))
+            conn.commit()

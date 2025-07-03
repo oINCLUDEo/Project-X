@@ -72,6 +72,23 @@ CREATE TABLE IF NOT EXISTS user_posts (
     PRIMARY KEY (user_id, post_id)
 );
 
+-- Создание таблицы кластеров
+CREATE TABLE clusters (
+    cluster_id SERIAL PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    lifetime_minutes INTEGER NOT NULL,
+    main_post_id INTEGER,
+    expires_at TIMESTAMP,
+    post_count INTEGER DEFAULT 1
+);
+
+-- Создание таблицы связи кластера с постами
+CREATE TABLE cluster_posts (
+    cluster_id INTEGER REFERENCES clusters(cluster_id) ON DELETE CASCADE,
+    post_id INTEGER REFERENCES posts(post_id) ON DELETE CASCADE,
+    PRIMARY KEY (cluster_id, post_id)
+);
+
 -- Создание индексов для оптимизации запросов
 CREATE INDEX IF NOT EXISTS idx_news_published_at ON posts(published_at);
 CREATE INDEX IF NOT EXISTS idx_news_is_hot ON posts(is_hot);
@@ -79,27 +96,62 @@ CREATE INDEX IF NOT EXISTS idx_user_news_is_read ON user_posts(is_read);
 CREATE INDEX IF NOT EXISTS idx_channels_is_active ON channels(is_active);
 CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
 
--- 1. Создание функции для триггера
-CREATE OR REPLACE FUNCTION enforce_limit()
+-- Триггер для счета количества постов в кластере
+CREATE OR REPLACE FUNCTION increment_post_count()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- Удалить все записи, кроме 100 самых новых
-    DELETE FROM posts
-    WHERE post_id NOT IN (
-        SELECT post_id FROM posts
-        ORDER BY created_at DESC
-        LIMIT 100
-    );
+    IF NEW.cluster_id IS NOT NULL THEN
+        UPDATE clusters
+        SET post_count = post_count + 1
+        WHERE cluster_id = NEW.cluster_id;
+    END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
--- 2. Создание триггера, который будет вызываться после каждой вставки
-DROP TRIGGER IF EXISTS limit_posts ON posts;
 
-CREATE TRIGGER limit_posts
-AFTER INSERT ON posts
+DROP TRIGGER IF EXISTS trg_increment_post_count ON cluster_posts;
+
+CREATE TRIGGER trg_increment_post_count
+AFTER INSERT ON cluster_posts
+FOR EACH ROW
+EXECUTE FUNCTION increment_post_count();
+
+-- Триггер высчитывает время истекания кластера
+CREATE OR REPLACE FUNCTION set_expires_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.expires_at := NEW.created_at + (NEW.lifetime_minutes * interval '1 minute');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_set_expires_at
+BEFORE INSERT ON clusters
+FOR EACH ROW
+EXECUTE FUNCTION set_expires_at();
+
+-- Триггер удаления осиротевших постов(после удаления кластера)
+CREATE OR REPLACE FUNCTION delete_orphan_posts()
+RETURNS TRIGGER AS $$
+BEGIN
+    DELETE FROM posts
+    WHERE post_id IN (
+        SELECT p.post_id
+        FROM posts p
+        LEFT JOIN cluster_posts cp ON p.post_id = cp.post_id
+        WHERE cp.post_id IS NULL
+    );
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_delete_orphan_posts ON cluster_posts;
+
+CREATE TRIGGER trg_delete_orphan_posts
+AFTER DELETE ON cluster_posts
 FOR EACH STATEMENT
-EXECUTE FUNCTION enforce_limit();
+EXECUTE FUNCTION delete_orphan_posts();
+
 
 -- Добавление категорий примера
 -- TODO: Категории должны добавляться парсингом с tgstat.ru
