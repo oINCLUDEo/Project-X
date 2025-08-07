@@ -252,13 +252,13 @@ def update_channel_info(channel_tg_id: int, username: str = None, title: str = N
         raise
 
 
-def add_post(channel_tg_id: int, content: str, embedding: list[float]):
+def add_post(channel_tg_id: int, content: str, embedding: list[float], media_urls: list[str]):
     """
     Добавляет новость с эмбеддингом в базу данных.
     """
     query = """
-        INSERT INTO posts (channel_tg_id, content, embedding)
-        VALUES (%s, %s, %s)
+        INSERT INTO posts (channel_tg_id, content, embedding, media_urls)
+        VALUES (%s, %s, %s, %s)
         RETURNING post_id;
     """
     try:
@@ -267,7 +267,8 @@ def add_post(channel_tg_id: int, content: str, embedding: list[float]):
                 cur.execute(query, (
                     channel_tg_id,
                     content,
-                    embedding
+                    embedding,
+                    media_urls
                 ))
                 post_id = cur.fetchone()[0]
                 logger.info(f"Новость успешно добавлена с ID {post_id}")
@@ -277,7 +278,7 @@ def add_post(channel_tg_id: int, content: str, embedding: list[float]):
         raise
 
 
-def create_new_cluster(main_post_id: int, lifetime_minutes=1440) -> int:
+def create_new_cluster(main_post_id: int, lifetime_minutes=360) -> int:
     query = """
         INSERT INTO clusters (main_post_id, lifetime_minutes)
         VALUES (%s, %s)
