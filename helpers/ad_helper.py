@@ -25,11 +25,17 @@ RE_CTA = re.compile(
     r'переходи|оформи|отправь|заходи|смотри|бронируй|присоединяйся|получить скидку|выиграй)\b', re.I)
 RE_HASHTAG_AD = re.compile(r'#реклама|#promo|#advertisement|#ads|#рекламка', re.I)
 RE_LINK = re.compile(r'https?://[^\s]+')
+RE_HREF = re.compile(r'href\s*=\s*"(https?://[^\"]+)"', re.I)
+RE_ERID = re.compile(r'\berid\s*[:=]\s*[A-Za-z0-9\-]{6,}', re.I)
 RE_CONTACTS = re.compile(r'@\w+|\+?\d[\d\-\s]{7,}', re.I)
 RE_PROMO = re.compile(r'промокод\s*[A-Za-z0-9]+', re.I)
 RE_PRICE = re.compile(r'(\d+[\s\,]?\d*)\s*(₽|руб\.?|рублей|р\b)', re.I)
-RE_PERCENT = re.compile(r'\b-?\d{1,3}\s?%\b')
-RE_PLAIN_AD = re.compile(r'\bреклама\b', re.I)
+RE_PERCENT = re.compile(r'\b[\-−–—]?\d{1,3}\s?%\b')
+# Маркер рекламной пометки отдельной строкой/в скобках; допускаем ссылку в скобках после точки
+RE_AD_TAG_LINE = re.compile(
+    r'(^|\n|\()\s*(реклама|advertisement|ads|promo)\s*(\.|!|:|\))?(\s*\(https?://[^\s)]+\))?\s*$',
+    re.I | re.M
+)
 
 # Часто встречающиеся короткие паттерны для кэша
 COMMON_PATTERNS = [
@@ -108,9 +114,19 @@ def process_post_for_ad_check(post, ad_threshold, channel_trust_level = 0.3, mod
         # Считаем engagement_score
         engagement_score = get_engagement_score_score_by_post_id(post['post_id'])
 
-        # Явные правила: если встречается слово "Реклама" как отдельное слово — сразу реклама
-        if RE_PLAIN_AD.search(text):
-            insert_ad_decision(post['post_id'], 1, 1.0, 'ad', None, {'rule': 'plain_ad_word'})
+        # Явные правила: рекламная пометка отдельной строкой/в скобках 
+        # или HTML-якорь с текстом "Реклама." / "Реклама" → сразу реклама
+        if RE_AD_TAG_LINE.search(text) or re.search(r'>\s*реклама\.?\s*<', text, re.I):
+            insert_ad_decision(post['post_id'], 1, 1.0, 'ad', None, {'rule': 'ad_tag_line'})
+            update_post_status(post['post_id'], "ad")
+            cluster_id = get_cluster_id_by_post(post['post_id'])
+            if cluster_id:
+                update_cluster_status(cluster_id, "ad")
+            return True
+
+        # ERID или #реклама — однозначные индикаторы рекламы в РФ
+        if RE_ERID.search(text) or RE_HASHTAG_AD.search(text):
+            insert_ad_decision(post['post_id'], 1, 1.0, 'ad', None, {'rule': 'erid_or_hashtag'})
             update_post_status(post['post_id'], "ad")
             cluster_id = get_cluster_id_by_post(post['post_id'])
             if cluster_id:
@@ -118,7 +134,10 @@ def process_post_for_ad_check(post, ad_threshold, channel_trust_level = 0.3, mod
             return True
 
         # Явное сочетание: процент скидки и контакт/бот/ссылка — сильный признак рекламы
-        if RE_PERCENT.search(text) and (RE_CONTACTS.search(text) or RE_LINK.search(text) or RE_PROMO.search(text)):
+        # Исключение: упоминание "реклама" в повествовательном контексте (исторический факт) не должно срабатывать,
+        # поэтому требуем дополнительный коммерческий маркер (контакт/ссылка/промокод) для правила про проценты
+        link_present = bool(RE_LINK.search(text) or RE_HREF.search(text))
+        if RE_PERCENT.search(text) and (RE_CONTACTS.search(text) or link_present or RE_PROMO.search(text)):
             insert_ad_decision(post['post_id'], 1, 0.95, 'ad', None, {'rule': 'percent_and_contact_or_link'})
             update_post_status(post['post_id'], "ad")
             cluster_id = get_cluster_id_by_post(post['post_id'])
