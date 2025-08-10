@@ -39,6 +39,11 @@ loggers:
     handlers: [ file, default ]
     propagate: false
 
+  AI:
+    level: INFO
+    handlers: [file, default]
+    propagate: false
+
   database.db_connection:
     level: INFO
     handlers: [default]

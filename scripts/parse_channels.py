@@ -42,6 +42,7 @@ def get_channels_from_tgstat(url: str = "https://tgstat.ru/tag/ulyanovsk-region"
     chrome_options.add_argument('--disable-gpu')  # Отключение GPU (иногда нужно для headless)
     chrome_options.add_argument('--window-size=1280,1024')  # Установка размера окна
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36') # Использование актуального User-Agent
+    driver = None
     try:
         logger.info("Инициализация Chrome Driver...")
         driver = webdriver.Chrome(

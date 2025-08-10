@@ -1,10 +1,16 @@
 import psycopg2
+from psycopg2.extras import Json
 import logging
 from config.config import load_config
 
 __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_user', 'add_channel', 'update_channel_info',
            'add_post', 'create_new_cluster', 'add_post_to_cluster', 'get_recent_clusters_with_embeddings',
-           'get_expired_clusters', 'get_main_post_for_cluster', 'delete_cluster']
+           'get_expired_clusters', 'get_main_post_for_cluster', 'delete_cluster',
+           'get_posts_in_active_clusters', 'update_post_engagement', 'get_posts_by_cluster', 'archive_cluster',
+           'update_post_status', 'update_cluster_status', 'get_cluster_id_by_post',
+           'get_engagement_score_score_by_post_id', 'get_post_content_by_id',
+           'insert_ad_decision', 'insert_ad_label', 'get_ad_label_for_post', 'increment_pattern_cache',
+           'get_top_patterns', 'get_recent_ad_decisions', 'upsert_model_version']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -386,6 +392,85 @@ def get_posts_in_active_clusters():
                 {'post_id': row[0], 'channel_tg_id': row[1], 'message_id': row[2]}
                 for row in cur.fetchall()
             ]
+
+def insert_ad_decision(post_id: int, stage: int, score: float, decision: str, model_version: str = None, features: dict | None = None):
+    query = """
+        INSERT INTO ad_decisions (post_id, stage, score, decision, model_version, features)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING decision_id;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id, stage, score, decision, model_version, Json(features) if features is not None else None))
+            return cur.fetchone()[0]
+
+def get_recent_ad_decisions(limit: int = 200):
+    query = """
+        SELECT decision_id, post_id, stage, score, decision, model_version, features, created_at
+        FROM ad_decisions
+        ORDER BY created_at DESC
+        LIMIT %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (limit,))
+            cols = [desc[0] for desc in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+def insert_ad_label(post_id: int, label: str, reviewer_tg_id: int | None = None, notes: str | None = None, source: str = 'admin'):
+    query = """
+        INSERT INTO ad_labels (post_id, label, reviewer_tg_id, notes, source)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (post_id) DO UPDATE SET
+            label = EXCLUDED.label,
+            reviewer_tg_id = EXCLUDED.reviewer_tg_id,
+            notes = EXCLUDED.notes,
+            source = EXCLUDED.source
+        RETURNING label_id;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id, label, reviewer_tg_id, notes, source))
+            return cur.fetchone()[0]
+
+def get_ad_label_for_post(post_id: int):
+    query = "SELECT label, reviewer_tg_id, notes, created_at FROM ad_labels WHERE post_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return { 'label': row[0], 'reviewer_tg_id': row[1], 'notes': row[2], 'created_at': row[3] }
+
+def increment_pattern_cache(pattern: str):
+    query = """
+        INSERT INTO ad_pattern_cache(pattern, hits, last_seen)
+        VALUES (%s, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT (pattern) DO UPDATE SET
+            hits = ad_pattern_cache.hits + 1,
+            last_seen = CURRENT_TIMESTAMP;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (pattern,))
+
+def get_top_patterns(limit: int = 100):
+    query = "SELECT pattern, hits, last_seen FROM ad_pattern_cache ORDER BY hits DESC LIMIT %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (limit,))
+            return cur.fetchall()
+
+def upsert_model_version(model_name: str, version: str):
+    query = """
+        INSERT INTO model_versions(model_name, version)
+        VALUES (%s, %s)
+        ON CONFLICT (model_name) DO UPDATE SET version = EXCLUDED.version;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (model_name, version))
 
 def update_post_engagement(post_id, views, reactions, comments, forwards, engagement_score):
     """

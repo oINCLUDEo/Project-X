@@ -11,6 +11,7 @@ from aiogram import types
 from aiogram.enums import ParseMode
 
 from helpers.ad_helper import compute_ad_score, process_post_for_ad_check
+from AI.Ai_Functions import predict_ad_probability, get_embedding
 from helpers.helpers import compute_cluster_score, get_users_for_post
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,11 @@ def process_ai_and_clustering(msg_from_channel_id, message_text, media_urls=None
     post_id = add_post(msg_from_channel_id, message_text, embedding, media_urls, message_id=message_id)
     clustering_result = process_post_and_cluster(msg_from_channel_id, embedding, post_id)
     logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})")
+    # Немедленный запуск фильтра рекламы на свежем посте (опционально)
+    try:
+        process_post_for_ad_check({'post_id': post_id}, ad_threshold=0.4, model_pred_func=predict_ad_probability)
+    except Exception as e:
+        logger.error(f"Ad filter immediate check failed for post {post_id}: {e}")
 
 
 # --- Универсальная публикация главного поста ---

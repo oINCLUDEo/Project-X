@@ -85,7 +85,7 @@ CREATE TABLE clusters (
     lifetime_minutes INTEGER NOT NULL,
     main_post_id INTEGER,
     expires_at TIMESTAMP,
-    post_count INTEGER DEFAULT 1,
+    post_count INTEGER DEFAULT 0,
     status VARCHAR(16) DEFAULT 'active'
 );
 
@@ -178,3 +178,50 @@ INSERT INTO categories (name, description) VALUES
     ('Общество', 'Тестовая категория Новости общественной жизни'),
     ('Происшествия', 'Тестовая категория Новости о происшествиях и чрезвычайных ситуациях')
 ON CONFLICT (name) DO NOTHING;
+
+-- ====================
+-- Таблицы для системы фильтрации рекламы
+-- ====================
+
+-- Логи решений по рекламе (для аудита и обучения)
+CREATE TABLE IF NOT EXISTS ad_decisions (
+    decision_id SERIAL PRIMARY KEY,
+    post_id INTEGER REFERENCES posts(post_id) ON DELETE CASCADE,
+    stage SMALLINT NOT NULL, -- 1: префильтр, 2: AI
+    score REAL,              -- скалярная оценка вероятности рекламы [0..1]
+    decision VARCHAR(16) NOT NULL, -- 'ad' | 'not_ad' | 'review'
+    model_version VARCHAR(64),
+    features JSONB,          -- сохраняем интерпретируемые признаки префильтра или AI
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ad_decisions_post_id ON ad_decisions(post_id);
+CREATE INDEX IF NOT EXISTS idx_ad_decisions_created_at ON ad_decisions(created_at);
+
+-- Ручная разметка постов по рекламе
+CREATE TABLE IF NOT EXISTS ad_labels (
+    label_id SERIAL PRIMARY KEY,
+    post_id INTEGER REFERENCES posts(post_id) ON DELETE CASCADE,
+    label VARCHAR(16) NOT NULL, -- 'ad' | 'not_ad' | 'ambiguous'
+    source VARCHAR(32) DEFAULT 'admin', -- 'admin' | 'user' | 'auto'
+    reviewer_tg_id BIGINT,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ad_labels_post ON ad_labels(post_id);
+CREATE INDEX IF NOT EXISTS idx_ad_labels_created_at ON ad_labels(created_at);
+
+-- Кэш часто встречающихся рекламных паттернов
+CREATE TABLE IF NOT EXISTS ad_pattern_cache (
+    pattern TEXT PRIMARY KEY,
+    hits INTEGER DEFAULT 0,
+    last_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Регистр версий моделей
+CREATE TABLE IF NOT EXISTS model_versions (
+    model_name VARCHAR(64) PRIMARY KEY,
+    version VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
