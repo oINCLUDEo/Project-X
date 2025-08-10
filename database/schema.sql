@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS posts (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     is_hot BOOLEAN DEFAULT FALSE,
     views_count INTEGER DEFAULT 0,
+    reactions_count INTEGER DEFAULT 0,
+    comments_count INTEGER DEFAULT 0,
+    forwards_count INTEGER DEFAULT 0,
+    engagement_score REAL DEFAULT 0,
+    status VARCHAR(16) DEFAULT 'active',
     message_id BIGINT
 );
 
@@ -80,7 +85,8 @@ CREATE TABLE clusters (
     lifetime_minutes INTEGER NOT NULL,
     main_post_id INTEGER,
     expires_at TIMESTAMP,
-    post_count INTEGER DEFAULT 1
+    post_count INTEGER DEFAULT 1,
+    status VARCHAR(16) DEFAULT 'active'
 );
 
 -- Создание таблицы связи кластера с постами
@@ -93,9 +99,14 @@ CREATE TABLE cluster_posts (
 -- Создание индексов для оптимизации запросов
 CREATE INDEX IF NOT EXISTS idx_news_published_at ON posts(published_at);
 CREATE INDEX IF NOT EXISTS idx_news_is_hot ON posts(is_hot);
+CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
 CREATE INDEX IF NOT EXISTS idx_user_news_is_read ON user_posts(is_read);
 CREATE INDEX IF NOT EXISTS idx_channels_is_active ON channels(is_active);
 CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
+CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
+
+-- Уникальность поста в рамках канала по message_id
+CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_channel_message ON posts(channel_tg_id, message_id);
 
 -- Триггер для счета количества постов в кластере
 CREATE OR REPLACE FUNCTION increment_post_count()

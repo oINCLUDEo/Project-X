@@ -51,9 +51,9 @@ def validate_post(event, type):
     return msg_from_channel_id, channel_categories, target_users
 
 def process_ai_and_clustering(msg_from_channel_id, message_text, media_urls=None, message_id=None):
-    embedding = get_embedding(message_text)
-    post_id = add_post(msg_from_channel_id, message_text, embedding.tolist(), media_urls, message_id=message_id)
-    clustering_result = process_post_and_cluster(msg_from_channel_id, message_text, post_id)
+    embedding = get_embedding(message_text).tolist()
+    post_id = add_post(msg_from_channel_id, message_text, embedding, media_urls, message_id=message_id)
+    clustering_result = process_post_and_cluster(msg_from_channel_id, embedding, post_id)
     logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})")
 
 

@@ -1,6 +1,5 @@
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from AI.Ai_Functions import get_embedding
 from database.db_connection import get_recent_clusters_with_embeddings, add_post_to_cluster, create_new_cluster
 
 SIMILARITY_THRESHOLD = 0.69
@@ -19,10 +18,11 @@ def find_similar_cluster(new_embedding: list[float], recent_clusters: list[tuple
     return None, max_similarity
 
 
-def process_post_and_cluster(channel_tg_id: int, content: str, post_id: int):
-    """Определяет, кластеризовать пост или создать новый кластер."""
-    embedding = get_embedding(content)
+def process_post_and_cluster(channel_tg_id: int, embedding: list[float], post_id: int):
+    """Определяет, кластеризовать пост или создать новый кластер.
 
+    Принимает уже рассчитанный embedding, чтобы избежать повторного вычисления.
+    """
     # Получить последние n кластеров (например, 50)
     recent_clusters = get_recent_clusters_with_embeddings(50)
 
