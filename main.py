@@ -3,10 +3,9 @@ import logging.config
 import yaml
 from config.config import load_config
 from database.db_connection import *
-from telethon_client.start_telethon import setup_handlers
+from telethon_client.start_telethon import setup_handlers, update_engagement_for_active_cluster_posts
 from aiogram_bot.handlers import user_handlers
-from telethon_client.handlers.handler_utils import cluster_publisher_task
-from database.db_connection import get_category_users, get_channel_category
+from telethon_client.handlers.handler_utils import engagement_publisher_task, ad_filter_task
 
 from aiogram import Bot, Dispatcher
 from telethon import TelegramClient
@@ -16,9 +15,6 @@ config = load_config()  # Загрузка config.py
 bot = Bot(token=config.aiogram_bot.token)
 dp = Dispatcher()
 
-def get_users_for_post(channel_tg_id):
-    categories = get_channel_category(channel_tg_id)
-    return get_category_users(tuple(categories))
 
 async def start_telethon():
     # Инициализация Telethon Клиента
@@ -40,7 +36,13 @@ async def start_telethon():
     await client.start(password=config.telethon_client.password)
     logger.info("Авторизация успешна")
     logger.info("Парсер новостных каналов успешно запущен")
+    # Запуск таска обновления просмотров
+    engagement_task = asyncio.create_task(update_engagement_for_active_cluster_posts(client))
+    ad_task = asyncio.create_task(ad_filter_task())
     await client.run_until_disconnected()
+    # Остановить таск при отключении клиента
+    engagement_task.cancel()
+    ad_task.cancel()
 
 
 async def start_aiogram():
@@ -53,7 +55,7 @@ async def start_aiogram():
 
 
 async def main():
-    publisher = asyncio.create_task(cluster_publisher_task(bot, bot.send_message, get_users_for_post))
+    publisher = asyncio.create_task(engagement_publisher_task(bot))
     await asyncio.gather(start_telethon(), start_aiogram(), publisher) # Запуск Бота, Телеграм Парсера и публикации кластеров асинхронно
 
 

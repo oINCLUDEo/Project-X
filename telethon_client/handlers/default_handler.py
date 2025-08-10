@@ -1,6 +1,6 @@
 import logging
+
 from telethon_client.handlers.handler_utils import validate_post, process_ai_and_clustering
-from helpers.helpers import remove_file
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,6 @@ async def default_handler(event, bot):
         media_urls.append(filename)
 
     try:
-        process_ai_and_clustering(msg_from_channel_id, message_text, media_urls)
+        process_ai_and_clustering(msg_from_channel_id, message_text, media_urls, message_id=event.id)
     except Exception as e:
         logger.error(f"Ошибка при обработке AI/кластеризации: {str(e)}")

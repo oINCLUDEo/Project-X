@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS posts (
     published_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     is_hot BOOLEAN DEFAULT FALSE,
-    views_count INTEGER DEFAULT 0
+    views_count INTEGER DEFAULT 0,
+    message_id BIGINT
 );
 
 -- Создание таблицы связи пользователей с категориями

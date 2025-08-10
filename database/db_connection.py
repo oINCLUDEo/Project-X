@@ -1,7 +1,6 @@
 import psycopg2
 import logging
 from config.config import load_config
-from datetime import datetime
 
 __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_user', 'add_channel', 'update_channel_info',
            'add_post', 'create_new_cluster', 'add_post_to_cluster', 'get_recent_clusters_with_embeddings',
@@ -252,13 +251,13 @@ def update_channel_info(channel_tg_id: int, username: str = None, title: str = N
         raise
 
 
-def add_post(channel_tg_id: int, content: str, embedding: list[float], media_urls: list[str]):
+def add_post(channel_tg_id: int, content: str, embedding: list[float], media_urls: list[str], message_id: int = None):
     """
-    Добавляет новость с эмбеддингом в базу данных.
+    Добавляет новость с эмбеддингом в базу данных, включая message_id.
     """
     query = """
-        INSERT INTO posts (channel_tg_id, content, embedding, media_urls)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO posts (channel_tg_id, content, embedding, media_urls, message_id)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING post_id;
     """
     try:
@@ -268,7 +267,8 @@ def add_post(channel_tg_id: int, content: str, embedding: list[float], media_url
                     channel_tg_id,
                     content,
                     embedding,
-                    media_urls
+                    media_urls,
+                    message_id
                 ))
                 post_id = cur.fetchone()[0]
                 logger.info(f"Новость успешно добавлена с ID {post_id}")
@@ -280,15 +280,19 @@ def add_post(channel_tg_id: int, content: str, embedding: list[float], media_url
 
 def create_new_cluster(main_post_id: int, lifetime_minutes=360) -> int:
     query = """
-        INSERT INTO clusters (main_post_id, lifetime_minutes)
-        VALUES (%s, %s)
-        RETURNING cluster_id;
-    """
+            WITH new_cluster AS (
+                INSERT INTO clusters (main_post_id, lifetime_minutes)
+                VALUES (%s, %s)
+                RETURNING cluster_id
+            )
+            INSERT INTO cluster_posts (cluster_id, post_id)
+            SELECT cluster_id, %s FROM new_cluster
+            RETURNING cluster_id;
+        """
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (main_post_id, lifetime_minutes))
+            cur.execute(query, (main_post_id, lifetime_minutes, main_post_id))
             return cur.fetchone()[0]
-
 
 def add_post_to_cluster(cluster_id: int, post_id: int):
     query = """
@@ -327,6 +331,19 @@ def get_expired_clusters():
             cur.execute(query)
             return cur.fetchall()  # [(cluster_id, main_post_id), ...]
 
+def get_active_clusters():
+    """
+    Возвращает список активных кластеров (expires_at > NOW()).
+    """
+    query = """
+        SELECT cluster_id, main_post_id FROM clusters
+        WHERE expires_at > NOW() AND status = 'active'
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()  # [(cluster_id, main_post_id), ...]
+
 def get_main_post_for_cluster(cluster_id):
     """
     Возвращает данные главного поста для кластера.
@@ -350,3 +367,165 @@ def delete_cluster(cluster_id):
         with conn.cursor() as cur:
             cur.execute(query, (cluster_id,))
             conn.commit()
+
+def get_posts_in_active_clusters():
+    """
+    Возвращает список постов (post_id, channel_tg_id, message_id) из активных кластеров.
+    """
+    query = """
+        SELECT p.post_id, p.channel_tg_id, p.message_id
+        FROM clusters c
+        JOIN cluster_posts cp ON c.cluster_id = cp.cluster_id
+        JOIN posts p ON cp.post_id = p.post_id
+        WHERE c.expires_at > NOW() AND c.status = 'active'
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return [
+                {'post_id': row[0], 'channel_tg_id': row[1], 'message_id': row[2]}
+                for row in cur.fetchall()
+            ]
+
+def update_post_engagement(post_id, views, reactions, comments, forwards, engagement_score):
+    """
+    Обновляет engagement-метрики для поста:
+    - Кол-во просмотров
+    - Взвешенные реакции
+    - Кол-во комментариев
+    - Кол-во пересылок
+    - Финальный engagement score (от 0 до 1)
+    """
+    query = """
+        UPDATE posts
+        SET 
+            views_count = %s,
+            reactions_count = %s,
+            comments_count = %s,
+            forwards_count = %s,
+            engagement_score = %s
+        WHERE post_id = %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (
+                views,
+                reactions,
+                comments,
+                forwards,
+                engagement_score,
+                post_id
+            ))
+            conn.commit()
+
+
+def get_posts_by_cluster(cluster_id):
+    """
+    Возвращает список постов для данного кластера с необходимыми метриками:
+    views, reactions, comments, forwards, channel_id и post_id.
+
+    Args:
+        cluster_id (int): ID кластера
+
+    Returns:
+        list[dict]: Список словарей с данными постов
+    """
+    query = """
+        SELECT 
+            p.post_id,
+            p.channel_tg_id,
+            p.views_count,
+            p.reactions_count,
+            p.comments_count,
+            p.forwards_count
+        FROM cluster_posts cp
+        JOIN posts p ON cp.post_id = p.post_id
+        WHERE cp.cluster_id = %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id,))
+            rows = cur.fetchall()
+            posts = []
+            for row in rows:
+                posts.append({
+                    'post_id': row[0],
+                    'channel_id': row[1],
+                    'views': row[2] or 0,
+                    'reactions': row[3] or 0,
+                    'comments': row[4] or 0,
+                    'forwards': row[5] or 0
+                })
+            return posts
+
+def archive_cluster(cluster_id):
+    """
+    Архивирует кластер и связанные с ним посты.
+    """
+    query_cluster = "UPDATE clusters SET status = 'archived' WHERE cluster_id = %s;"
+    query_posts = """
+            UPDATE posts
+            SET status = 'archived'
+            WHERE post_id IN (
+                SELECT post_id FROM cluster_posts WHERE cluster_id = %s
+            );
+        """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query_cluster, (cluster_id,))
+            cur.execute(query_posts, (cluster_id,))
+            conn.commit()
+
+def update_post_status(post_id, status):
+    """
+    Обновляет поле status для одного поста.
+
+    :param post_id: идентификатор поста
+    :param status: новое значение статуса, например 'ad', 'active', 'archived'
+    """
+    query = "UPDATE posts SET status = %s WHERE post_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (status, post_id))
+            conn.commit()
+
+def update_cluster_status(cluster_id, status):
+    """
+    Обновляет поле status для одного кластера.
+
+    :param cluster_id: идентификатор кластера
+    :param status: новое значение статуса, например 'ad', 'active', 'archived'
+    """
+    query = "UPDATE clusters SET status = %s WHERE cluster_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (status, cluster_id))
+            conn.commit()
+
+def get_cluster_id_by_post(post_id):
+    query = "SELECT cluster_id FROM cluster_posts WHERE post_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id,))
+            result = cur.fetchone()
+            return result[0] if result else None
+
+def get_engagement_score_score_by_post_id(post_id):
+    query = "SELECT engagement_score FROM posts WHERE post_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id,))
+            result = cur.fetchone()
+            return result[0] if result else 0.0
+
+def get_post_content_by_id(post_id):
+    query = "SELECT content FROM posts WHERE post_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id,))
+            result = cur.fetchone()
+            if result:
+                return result[0]  # содержимое content
+            else:
+                return None  # пост не найден
+

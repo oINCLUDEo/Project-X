@@ -1,12 +1,17 @@
 import logging
+import asyncio
 from telethon import utils
-from database.db_connection import get_channel_category, get_category_users, add_post, get_expired_clusters, get_main_post_for_cluster, delete_cluster
+from database.db_connection import get_channel_category, get_category_users, add_post, get_expired_clusters, \
+    get_main_post_for_cluster, get_active_clusters, get_posts_by_cluster, archive_cluster, get_posts_in_active_clusters, \
+    update_post_status, get_cluster_id_by_post, update_cluster_status
 from AI.Ai_Functions import get_embedding
 from AI.clustering import process_post_and_cluster
-import asyncio
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram import types
 from aiogram.enums import ParseMode
+
+from helpers.ad_helper import compute_ad_score, process_post_for_ad_check
+from helpers.helpers import compute_cluster_score, get_users_for_post
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +50,9 @@ def validate_post(event, type):
         return None, None, None
     return msg_from_channel_id, channel_categories, target_users
 
-def process_ai_and_clustering(msg_from_channel_id, message_text, media_urls=None):
+def process_ai_and_clustering(msg_from_channel_id, message_text, media_urls=None, message_id=None):
     embedding = get_embedding(message_text)
-    post_id = add_post(msg_from_channel_id, message_text, embedding.tolist(), media_urls)
+    post_id = add_post(msg_from_channel_id, message_text, embedding.tolist(), media_urls, message_id=message_id)
     clustering_result = process_post_and_cluster(msg_from_channel_id, message_text, post_id)
     logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})")
 
@@ -107,25 +112,48 @@ async def publish_main_post(bot, users, post_row):
             parse_mode=ParseMode.HTML
         )
 
-# --- Фоновый таск публикации главных новостей кластеров ---
-async def cluster_publisher_task(bot, send_func, get_users_for_post, interval=30):
+
+async def engagement_publisher_task(bot, interval=30, min_score=0.5):
     """
-    Периодически ищет истёкшие кластеры, отправляет главный пост пользователям и удаляет кластер.
+    Периодически проверяет engagement кластеров и публикует, если score >= min_score.
+
     :param bot: объект бота
-    :param send_func: функция отправки (например, bot.send_message)
+    :param get_posts_by_cluster: функция, возвращающая список постов кластера по cluster_id
     :param get_users_for_post: функция, возвращающая список пользователей для поста
     :param interval: интервал проверки в секундах
+    :param min_score: минимальное значение score для публикации
     """
     while True:
-        expired_clusters = get_expired_clusters()
-        for cluster_id, main_post_id in expired_clusters:
-            main_post = get_main_post_for_cluster(cluster_id)
-            if main_post:
+        active_clusters = get_active_clusters()  # [(cluster_id, main_post_id), ...]
+        for cluster_id, main_post_id in active_clusters:
+            cluster_posts = get_posts_by_cluster(cluster_id)
+            if not cluster_posts:
+                logger.info(f"Кластер {cluster_id} пустой, пропускаем")
+                continue
+            score = compute_cluster_score(cluster_posts)
+            logger.info(f"Кластер {cluster_id} score={score:.4f}")
+            if score >= min_score:
+                main_post = get_main_post_for_cluster(cluster_id)
+                if not main_post:
+                    logger.warning(f"Главный пост {main_post_id} не найден в кластере {cluster_id}")
+                    continue
                 channel_tg_id = main_post[1]
                 users = get_users_for_post(channel_tg_id)
-                if users:
-                    await publish_main_post(bot, users, main_post)
-                    logger.info(f"Главная новость кластера {cluster_id} отправлена {len(users)} пользователям")
-            delete_cluster(cluster_id)
-            logger.info(f"Кластер {cluster_id} удалён после публикации")
-        await asyncio.sleep(interval) 
+                if not users:
+                    logger.info(f"Нет пользователей для поста {main_post_id} канала {main_post['channel_tg_id']}")
+                    continue
+                await publish_main_post(bot, users, main_post)
+                logger.info(f"Кластер {cluster_id} опубликован с score={score:.4f}")
+                archive_cluster(cluster_id)
+        await asyncio.sleep(interval)
+
+
+async def ad_filter_task(interval=30, ad_threshold=0.4):
+    while True:
+        try:
+            active_posts = get_posts_in_active_clusters()
+            for post in active_posts:
+                is_ad = process_post_for_ad_check(post, ad_threshold)
+        except Exception as e:
+            logger.error(f"Ошибка в ad_filter_task: {e}")
+        await asyncio.sleep(interval)
