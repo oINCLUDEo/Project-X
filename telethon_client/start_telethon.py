@@ -1,4 +1,6 @@
 from telethon import events
+import os
+from config.config import load_config
 
 from helpers.helpers import compute_heat_score
 from telethon_client.handlers.album_handler import album_handler
@@ -61,5 +63,8 @@ async def update_engagement_for_active_cluster_posts(client, interval=30):
         await asyncio.sleep(interval)
 
 def setup_handlers(client, channels, bot):
+    # Ensure media directory exists at startup
+    cfg = load_config()
+    os.makedirs(cfg.storage.media_dir, exist_ok=True)
     client.add_event_handler(lambda event: album_handler(event, bot), events.Album(chats=channels))
     client.add_event_handler(lambda event: default_handler(event, bot), events.NewMessage(chats=channels))

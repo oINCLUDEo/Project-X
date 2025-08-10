@@ -25,10 +25,16 @@ class TelethonClient:
 
 
 @dataclass
+class StorageConfig:
+    media_dir: str          # Каталог для сохранения медиа
+
+
+@dataclass
 class Config:
     aiogram_bot: AiogramBot
     telethon_client: TelethonClient
     db: DatabaseConfig
+    storage: StorageConfig
 
 
 def load_config() -> Config:
@@ -49,5 +55,8 @@ def load_config() -> Config:
             db_user=os.getenv('DB_USER'),
             db_password=os.getenv('DB_PASSWORD'),
             db_port=os.getenv('DB_PORT')
+        ),
+        storage=StorageConfig(
+            media_dir=os.getenv('MEDIA_DIR', 'media')
         )
     )

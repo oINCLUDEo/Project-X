@@ -1,6 +1,8 @@
 import logging
 
 from telethon_client.handlers.handler_utils import validate_post, process_ai_and_clustering
+from config.config import load_config
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +15,12 @@ async def album_handler(event, bot):
     if not target_users:
         return
 
+    cfg = load_config()
+    media_dir = cfg.storage.media_dir
+    os.makedirs(media_dir, exist_ok=True)
+
     for file in event.messages:
-        filename = await file.download_media()
+        filename = await file.download_media(file=media_dir)
         media_urls.append(filename)
 
     try:

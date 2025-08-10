@@ -1,6 +1,8 @@
 import logging
 
 from telethon_client.handlers.handler_utils import validate_post, process_ai_and_clustering
+from config.config import load_config
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +19,10 @@ async def default_handler(event, bot):
         return
 
     if event.media:
-        filename = await event.download_media()
+        cfg = load_config()
+        media_dir = cfg.storage.media_dir
+        os.makedirs(media_dir, exist_ok=True)
+        filename = await event.download_media(file=media_dir)
         media_urls.append(filename)
 
     try:
