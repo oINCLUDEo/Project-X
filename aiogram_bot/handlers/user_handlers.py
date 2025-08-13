@@ -1,6 +1,6 @@
 import logging
 
-from database.db_connection import add_user, insert_ad_label
+from database.db_connection import add_user, insert_ad_label, record_user_feedback
 from aiogram import Router, Dispatcher
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart, Command
@@ -21,12 +21,23 @@ async def cmd_start(message: Message):
 async def process_like_dislike(callback_query: CallbackQuery):
     action, post_id = callback_query.data.split('_')  # Разделяем "like_123" → ("like", "123")
     user_id = callback_query.from_user.id
-    if action == "like":
-        # Логика для лайка (например, +1 в БД)
-        await callback_query.answer("Спасибо за лайк! ❤️")
-    elif action == "dislike":
-        # Логика для дизлайка
-        await callback_query.answer("Жаль, что не понравилось... 😢")
+    try:
+        post_id_int = int(post_id)
+    except ValueError:
+        await callback_query.answer("Некорректный ID поста", show_alert=True)
+        return
+    try:
+        if action in ("like", "dislike"):
+            record_user_feedback(user_id, post_id_int, action)
+            if action == "like":
+                await callback_query.answer("Спасибо за лайк! ❤️")
+            else:
+                await callback_query.answer("Учтём ваш дизлайк", show_alert=False)
+        else:
+            await callback_query.answer("Неизвестное действие", show_alert=True)
+    except Exception as e:
+        logger.error("Ошибка сохранения фидбека: %s", str(e))
+        await callback_query.answer("Ошибка, попробуйте позже", show_alert=True)
 
 
 @router.message(Command("label"))

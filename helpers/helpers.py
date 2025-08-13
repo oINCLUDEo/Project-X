@@ -22,26 +22,22 @@ def get_users_for_post(channel_tg_id):
 
 
 def compute_heat_score(views, reactions, comments, forwards,
-                       a=1, b=1.5, c=2, alpha=1,
-                       dt_hours: float | None = None,
-                       time_decay_half_life_h: float = 6.0):
+                       a=1, b=1.5, c=2, alpha=1):
     """
-    Тепловой скоринг поста с учётом динамики (временной распад):
-    heat = sigmoid((a*reactions + b*comments + c*forwards) / (views^alpha + 1)) * time_decay
-    где time_decay = 0.5 ** (dt_hours / half_life)
+    Тепловой скоринг поста без временного распада, рассчитанный по общему уровню вовлеченности.
+    heat = sigmoid((a*reactions + b*comments + c*forwards) / (views^alpha + 1))
     """
     numerator = a * reactions + b * comments + c * forwards
     denominator = (views ** alpha) + 1
     base = numerator / denominator if denominator > 0 else 0.0
-    time_decay = 1.0
-    if dt_hours is not None and dt_hours >= 0:
-        time_decay = 0.5 ** (dt_hours / max(0.1, time_decay_half_life_h))
-    return sigmoid(base) * time_decay
+    return sigmoid(base)
 
 
 def compute_cluster_score(cluster_posts: List[Dict], a=1, b=1.5, c=2, alpha=1,
                           channel_reputation_weight: float = 0.3,
-                          diversity_weight: float = 0.2):
+                          diversity_weight: float = 0.35,
+                          absolute_views_weight: float = 0.25,
+                          views_scale: float = 5000.0):
     """
     Улучшенный скоринг кластера:
     - Engagement rate склеенный по кластеру
@@ -66,6 +62,7 @@ def compute_cluster_score(cluster_posts: List[Dict], a=1, b=1.5, c=2, alpha=1,
     er = numerator / denominator if denominator > 0 else 0.0
 
     diversity_multiplier = 1.0 + diversity_weight * math.log(unique_channels + 1)
+    absolute_views_multiplier = 1.0 + absolute_views_weight * math.log(1.0 + (total_views / max(1.0, views_scale)))
     reputation_multiplier = (1.0 - channel_reputation_weight) + channel_reputation_weight * avg_rep
-    score = sigmoid(er * 10) * diversity_multiplier * reputation_multiplier
+    score = sigmoid(er * 10) * diversity_multiplier * absolute_views_multiplier * reputation_multiplier
     return score

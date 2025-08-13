@@ -13,8 +13,9 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_top_patterns', 'get_recent_ad_decisions', 'upsert_model_version',
            'get_system_param', 'set_system_param', 'log_cluster_score',
            'get_channel_tg_id_for_post', 'recalc_channel_reputation', 'get_post_prev_metrics',
-           'get_channel_reputation', 'get_channel_reputation_by_post_id',
-           'get_posts_by_cluster_with_reputation']
+           'get_channel_reputation', 'get_channel_reputation_by_post_id', 'get_cluster_metadata',
+           'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores',
+           'record_user_feedback']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -118,6 +119,47 @@ def add_user(user_tg_id):
         logger.info("Пользователь успешно добавлен!")
     except psycopg2.IntegrityError:
         logger.exception("Ошибка уникальности:")
+
+
+def _get_or_create_user_id(user_tg_id: int) -> int:
+    """Возвращает user_id по Telegram ID, создаёт пользователя при необходимости."""
+    select_q = "SELECT user_id FROM users WHERE user_tg_id = %s;"
+    insert_q = "INSERT INTO users(user_tg_id) VALUES (%s) RETURNING user_id;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(select_q, (user_tg_id,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            cur.execute(insert_q, (user_tg_id,))
+            return cur.fetchone()[0]
+
+
+def record_user_feedback(user_tg_id: int, post_id: int, action: str) -> None:
+    """
+    Сохраняет лайк/дизлайк пользователя для поста.
+    action: 'like' | 'dislike'
+    - like: is_liked=True, is_hidden=False
+    - dislike: is_liked=False, is_hidden=True
+    """
+    user_id = _get_or_create_user_id(user_tg_id)
+    is_liked = True if action == 'like' else False
+    is_hidden = False if action == 'like' else True
+    upsert_q = """
+        INSERT INTO user_posts(user_id, post_id, is_read, is_liked, is_hidden, read_at)
+        VALUES (%s, %s, TRUE, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id, post_id) DO UPDATE SET
+            is_read = EXCLUDED.is_read,
+            is_liked = EXCLUDED.is_liked,
+            is_hidden = EXCLUDED.is_hidden,
+            read_at = EXCLUDED.read_at
+    """
+    touch_user_q = "UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE user_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(upsert_q, (user_id, post_id, is_liked, is_hidden))
+            cur.execute(touch_user_q, (user_id,))
+            conn.commit()
 
 
 def add_channel(channel_tg_id: int, username: str, title: str, description: str = None,
@@ -273,9 +315,11 @@ def add_post(channel_tg_id: int, content: str, embedding: list[float], media_url
     try:
         with _get_db_connection() as conn:
             with conn.cursor() as cur:
+                # Нормализуем пустой текст, чтобы не сохранять NULL
+                norm_content = content if (content is not None and content != "") else ""
                 cur.execute(query, (
                     channel_tg_id,
-                    content,
+                    norm_content,
                     embedding,
                     media_urls,
                     message_id
@@ -552,6 +596,26 @@ def get_posts_by_cluster(cluster_id):
                 })
             return posts
 
+def get_cluster_metadata(cluster_id: int):
+    """
+    Возвращает метаданные кластера: created_at, expires_at, post_count.
+    """
+    query = """
+        SELECT created_at, expires_at, post_count
+        FROM clusters WHERE cluster_id = %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                'created_at': row[0],
+                'expires_at': row[1],
+                'post_count': row[2] or 0
+            }
+
 def get_posts_by_cluster_with_reputation(cluster_id):
     """
     Возвращает посты кластера вместе с репутацией канала.
@@ -718,6 +782,47 @@ def log_cluster_score(cluster_id: int, algorithm: str, score: float):
         with conn.cursor() as cur:
             cur.execute(query, (cluster_id, algorithm, score))
             conn.commit()
+
+def get_recent_clusters(window_minutes: int = 120):
+    """
+    Возвращает последние кластеры за окно времени.
+    """
+    query = """
+        SELECT cluster_id, created_at, expires_at, post_count, status
+        FROM clusters
+        WHERE created_at > NOW() - (INTERVAL '1 minute' * %s);
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (window_minutes,))
+            rows = cur.fetchall()
+            return [
+                {
+                    'cluster_id': r[0],
+                    'created_at': r[1],
+                    'expires_at': r[2],
+                    'post_count': r[3] or 0,
+                    'status': r[4]
+                }
+                for r in rows
+            ]
+
+def get_latest_cluster_scores(algorithm: str, window_minutes: int = 120):
+    """
+    Возвращает последний зафиксированный скор для каждого кластера в окне времени.
+    """
+    query = """
+        SELECT DISTINCT ON (cluster_id) cluster_id, score
+        FROM cluster_scores
+        WHERE algorithm = %s
+          AND created_at > NOW() - (INTERVAL '1 minute' * %s)
+        ORDER BY cluster_id, created_at DESC;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (algorithm, window_minutes))
+            rows = cur.fetchall()
+            return { r[0]: float(r[1]) for r in rows }
 
 def recalc_channel_reputation(channel_tg_id: int):
     """

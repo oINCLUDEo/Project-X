@@ -31,24 +31,30 @@ RE_ERID = re.compile(r'\berid\s*[:=]\s*[A-Za-z0-9\-]{6,}', re.I)
 RE_CONTACTS = re.compile(r'@\w+|\+?\d[\d\-\s]{7,}', re.I)
 RE_PROMO = re.compile(r'промокод\s*[A-Za-z0-9]+', re.I)
 RE_PRICE = re.compile(r'(\d+[\s\,]?\d*)\s*(₽|руб\.?|рублей|р\b)', re.I)
-RE_PERCENT = re.compile(r'\b[\-−–—]?\d{1,3}\s?%\b')
+# Проценты вида -40%, 40%, допустимы разные тире; избегаем \b, чтобы ловить начало со знака
+RE_PERCENT = re.compile(r'(?<!\w)[\-−–—]?\d{1,3}\s?%(?!\w)')
 # Маркер рекламной пометки отдельной строкой/в скобках; допускаем ссылку в скобках после точки
 RE_AD_TAG_LINE = re.compile(
-    r'(^|\n|\()\s*(реклама|advertisement|ads|promo)\s*(\.|!|:|\))?(\s*\(https?://[^\s)]+\))?\s*$',
+    r'(^|\n|\()\s*(реклама|advertisement|ads|promo)\s*([\.|!|:|,|\)])?(\s*\(https?://[^\s)]+\))?\s*$',
     re.I | re.M
 )
+RE_AD_LEGAL = re.compile(r'(^|\n)\s*реклама\s*[,\.:!\-]\s*(ООО|ИП|АО|ОАО|ПАО)\b', re.I)
 
 # Часто встречающиеся короткие паттерны для кэша
 COMMON_PATTERNS = [
     'скидка', 'акция', 'промокод', 'только сегодня', 'цена', 'бронируй', 'подпишись', 'реклама'
 ]
 
+# Розыгрыши/конкурсы
+RE_GIVEAWAY = re.compile(r'\b(розыгрыш|разыгрываем|конкурс|гив)\b', re.I)
+RE_COMMENT = re.compile(r'комментар(ий|иях|ии|ев)', re.I)
+
 
 def compute_ad_score(post, past_posts_texts, heat_score, channel_trust_level,
                      w1=0.22, w2=0.12, w3=0.18, w4=0.18, w5=0.1, w6=0.1, w7=0.1):
     try:
-        text = get_post_content_by_id(post['post_id'])
-        text_len = len(text) or 1  # избегаем деления на 0
+        text = get_post_content_by_id(post['post_id']) or ""
+        text_len = max(1, len(text))  # избегаем деления на 0
 
         # 1. Keyword score
         keyword_count = len(RE_AD_KEYWORDS.findall(text))
@@ -119,7 +125,7 @@ def process_post_for_ad_check(post, ad_threshold, channel_trust_level = 0.3, mod
 
         # Явные правила: рекламная пометка отдельной строкой/в скобках 
         # или HTML-якорь с текстом "Реклама." / "Реклама" → сразу реклама
-        if RE_AD_TAG_LINE.search(text) or re.search(r'>\s*реклама\.?\s*<', text, re.I):
+        if RE_AD_TAG_LINE.search(text) or re.search(r'>\s*реклама[\.,!]?\s*<', text, re.I) or RE_AD_LEGAL.search(text):
             insert_ad_decision(post['post_id'], 1, 1.0, 'ad', None, {'rule': 'ad_tag_line'})
             update_post_status(post['post_id'], "ad")
             cluster_id = get_cluster_id_by_post(post['post_id'])
@@ -136,12 +142,28 @@ def process_post_for_ad_check(post, ad_threshold, channel_trust_level = 0.3, mod
                 update_cluster_status(cluster_id, "ad")
             return True
 
-        # Явное сочетание: процент скидки и контакт/бот/ссылка — сильный признак рекламы
-        # Исключение: упоминание "реклама" в повествовательном контексте (исторический факт) не должно срабатывать,
-        # поэтому требуем дополнительный коммерческий маркер (контакт/ссылка/промокод) для правила про проценты
+        # Явные сочетания: проценты скидок с коммерческими маркерами ИЛИ розыгрыши с условиями участия
         link_present = bool(RE_LINK.search(text) or RE_HREF.search(text))
+        # ERID в href
+        if not RE_ERID.search(text):
+            for href in RE_HREF.findall(text):
+                if RE_ERID.search(href):
+                    insert_ad_decision(post['post_id'], 1, 1.0, 'ad', None, {'rule': 'erid_in_href'})
+                    update_post_status(post['post_id'], "ad")
+                    cluster_id = get_cluster_id_by_post(post['post_id'])
+                    if cluster_id:
+                        update_cluster_status(cluster_id, "ad")
+                    return True
         if RE_PERCENT.search(text) and (RE_CONTACTS.search(text) or link_present or RE_PROMO.search(text)):
             insert_ad_decision(post['post_id'], 1, 0.95, 'ad', None, {'rule': 'percent_and_contact_or_link'})
+            update_post_status(post['post_id'], "ad")
+            cluster_id = get_cluster_id_by_post(post['post_id'])
+            if cluster_id:
+                update_cluster_status(cluster_id, "ad")
+            return True
+
+        if RE_GIVEAWAY.search(text) and (RE_COMMENT.search(text) or RE_CONTACTS.search(text) or link_present):
+            insert_ad_decision(post['post_id'], 1, 0.9, 'ad', None, {'rule': 'giveaway_and_call_to_action'})
             update_post_status(post['post_id'], "ad")
             cluster_id = get_cluster_id_by_post(post['post_id'])
             if cluster_id:

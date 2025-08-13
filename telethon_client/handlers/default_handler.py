@@ -12,7 +12,7 @@ async def default_handler(event, bot):
     logger.info("Получено новое сообщение")
     filename = ""
     media_urls = []
-    message_text = event.message.text
+    message_text = event.message.text or ""
 
     msg_from_channel_id, channel_categories, target_users = validate_post(event, "default message")
     if not target_users:
