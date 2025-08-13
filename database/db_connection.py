@@ -10,7 +10,11 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'update_post_status', 'update_cluster_status', 'get_cluster_id_by_post',
            'get_engagement_score_score_by_post_id', 'get_post_content_by_id',
            'insert_ad_decision', 'insert_ad_label', 'get_ad_label_for_post', 'increment_pattern_cache',
-           'get_top_patterns', 'get_recent_ad_decisions', 'upsert_model_version']
+           'get_top_patterns', 'get_recent_ad_decisions', 'upsert_model_version',
+           'get_system_param', 'set_system_param', 'log_cluster_score',
+           'get_channel_tg_id_for_post', 'recalc_channel_reputation', 'get_post_prev_metrics',
+           'get_channel_reputation', 'get_channel_reputation_by_post_id',
+           'get_posts_by_cluster_with_reputation']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -484,11 +488,16 @@ def update_post_engagement(post_id, views, reactions, comments, forwards, engage
     query = """
         UPDATE posts
         SET 
+            prev_views_count = views_count,
+            prev_reactions_count = reactions_count,
+            prev_comments_count = comments_count,
+            prev_forwards_count = forwards_count,
             views_count = %s,
             reactions_count = %s,
             comments_count = %s,
             forwards_count = %s,
-            engagement_score = %s
+            engagement_score = %s,
+            last_engagement_update = NOW()
         WHERE post_id = %s;
     """
     with _get_db_connection() as conn:
@@ -540,6 +549,41 @@ def get_posts_by_cluster(cluster_id):
                     'reactions': row[3] or 0,
                     'comments': row[4] or 0,
                     'forwards': row[5] or 0
+                })
+            return posts
+
+def get_posts_by_cluster_with_reputation(cluster_id):
+    """
+    Возвращает посты кластера вместе с репутацией канала.
+    """
+    query = """
+        SELECT 
+            p.post_id,
+            p.channel_tg_id,
+            p.views_count,
+            p.reactions_count,
+            p.comments_count,
+            p.forwards_count,
+            COALESCE(ch.reputation_score, 0.5) AS reputation_score
+        FROM cluster_posts cp
+        JOIN posts p ON cp.post_id = p.post_id
+        JOIN channels ch ON ch.channel_tg_id = p.channel_tg_id
+        WHERE cp.cluster_id = %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id,))
+            rows = cur.fetchall()
+            posts = []
+            for row in rows:
+                posts.append({
+                    'post_id': row[0],
+                    'channel_id': row[1],
+                    'views': row[2] or 0,
+                    'reactions': row[3] or 0,
+                    'comments': row[4] or 0,
+                    'forwards': row[5] or 0,
+                    'channel_reputation': float(row[6]) if row[6] is not None else 0.5
                 })
             return posts
 
@@ -595,6 +639,14 @@ def get_cluster_id_by_post(post_id):
             result = cur.fetchone()
             return result[0] if result else None
 
+def get_channel_tg_id_for_post(post_id: int) -> int | None:
+    query = "SELECT channel_tg_id FROM posts WHERE post_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
 def get_engagement_score_score_by_post_id(post_id):
     query = "SELECT engagement_score FROM posts WHERE post_id = %s;"
     with _get_db_connection() as conn:
@@ -613,4 +665,116 @@ def get_post_content_by_id(post_id):
                 return result[0]  # содержимое content
             else:
                 return None  # пост не найден
+
+def get_post_prev_metrics(post_id: int):
+    """
+    Возвращает предыдущие метрики и временные метки для поста.
+    """
+    query = """
+        SELECT prev_views_count, prev_reactions_count, prev_comments_count, prev_forwards_count,
+               last_engagement_update, published_at
+        FROM posts WHERE post_id = %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                'prev_views': row[0] or 0,
+                'prev_reactions': row[1] or 0,
+                'prev_comments': row[2] or 0,
+                'prev_forwards': row[3] or 0,
+                'last_update': row[4],
+                'published_at': row[5]
+            }
+
+def get_system_param(key: str, default: str | None = None):
+    query = "SELECT param_value FROM system_params WHERE param_key = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (key,))
+            row = cur.fetchone()
+            return row[0] if row else default
+
+def set_system_param(key: str, value: str):
+    query = """
+        INSERT INTO system_params(param_key, param_value)
+        VALUES (%s, %s)
+        ON CONFLICT (param_key) DO UPDATE SET param_value = EXCLUDED.param_value, updated_at = CURRENT_TIMESTAMP;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (key, value))
+            conn.commit()
+
+def log_cluster_score(cluster_id: int, algorithm: str, score: float):
+    query = """
+        INSERT INTO cluster_scores(cluster_id, algorithm, score)
+        VALUES (%s, %s, %s);
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id, algorithm, score))
+            conn.commit()
+
+def recalc_channel_reputation(channel_tg_id: int):
+    """
+    Пересчитывает метрики канала (ad_ratio, quality_score, reputation_score) на основе постов за 30 дней.
+    reputation_score в [0..1]: 0.2 + 0.6*(1 - ad_ratio) + 0.2*quality_score, усечённое.
+    """
+    query_stats = """
+        WITH recent AS (
+            SELECT status, engagement_score
+            FROM posts
+            WHERE channel_tg_id = %s AND created_at > NOW() - INTERVAL '30 days'
+        )
+        SELECT
+            CASE WHEN COUNT(*) = 0 THEN 0.0 ELSE (SUM(CASE WHEN status = 'ad' THEN 1 ELSE 0 END)::float / COUNT(*)) END AS ad_ratio,
+            COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY engagement_score), 0.0) AS quality_score
+        FROM recent;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query_stats, (channel_tg_id,))
+            row = cur.fetchone()
+            if not row:
+                ad_ratio = 0.0
+                quality_score = 0.0
+            else:
+                ad_ratio = float(row[0] or 0.0)
+                quality_score = float(row[1] or 0.0)
+            reputation = max(0.0, min(1.0, 0.2 + 0.6 * (1.0 - ad_ratio) + 0.2 * quality_score))
+            update_query = """
+                UPDATE channels
+                SET ad_ratio = %s,
+                    quality_score = %s,
+                    reputation_score = %s,
+                    last_reputation_update = NOW(),
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE channel_tg_id = %s;
+            """
+            cur.execute(update_query, (ad_ratio, quality_score, reputation, channel_tg_id))
+            conn.commit()
+
+def get_channel_reputation(channel_tg_id: int) -> float:
+    query = "SELECT reputation_score FROM channels WHERE channel_tg_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (channel_tg_id,))
+            row = cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else 0.5
+
+def get_channel_reputation_by_post_id(post_id: int) -> float:
+    query = """
+        SELECT COALESCE(c.reputation_score, 0.5)
+        FROM posts p JOIN channels c ON c.channel_tg_id = p.channel_tg_id
+        WHERE p.post_id = %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (post_id,))
+            row = cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else 0.5
 

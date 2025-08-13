@@ -3,7 +3,8 @@ import asyncio
 from telethon import utils
 from database.db_connection import get_channel_category, get_category_users, add_post, get_expired_clusters, \
     get_main_post_for_cluster, get_active_clusters, get_posts_by_cluster, archive_cluster, get_posts_in_active_clusters, \
-    update_post_status, get_cluster_id_by_post, update_cluster_status
+    update_post_status, get_cluster_id_by_post, update_cluster_status, \
+    get_posts_by_cluster_with_reputation, log_cluster_score, get_system_param, recalc_channel_reputation
 from AI.Ai_Functions import get_embedding
 from AI.clustering import process_post_and_cluster
 from aiogram.utils.media_group import MediaGroupBuilder
@@ -132,13 +133,31 @@ async def engagement_publisher_task(bot, interval=30, min_score=0.5):
     while True:
         active_clusters = get_active_clusters()  # [(cluster_id, main_post_id), ...]
         for cluster_id, main_post_id in active_clusters:
+            # A/B: baseline vs improved
             cluster_posts = get_posts_by_cluster(cluster_id)
+            improved_posts = get_posts_by_cluster_with_reputation(cluster_id)
             if not cluster_posts:
                 logger.info(f"Кластер {cluster_id} пустой, пропускаем")
                 continue
-            score = compute_cluster_score(cluster_posts)
-            logger.info(f"Кластер {cluster_id} score={score:.4f}")
-            if score >= min_score:
+            # Baseline score (без репутации)
+            baseline_score = compute_cluster_score(cluster_posts, channel_reputation_weight=0.0, diversity_weight=0.2)
+            # Improved score (с репутацией)
+            improved_score = compute_cluster_score(improved_posts, channel_reputation_weight=0.3, diversity_weight=0.2)
+            try:
+                log_cluster_score(cluster_id, 'baseline', baseline_score)
+                log_cluster_score(cluster_id, 'improved', improved_score)
+            except Exception:
+                pass
+            logger.info(f"Кластер {cluster_id} baseline={baseline_score:.4f} improved={improved_score:.4f}")
+
+            # Выбор алгоритма из системных параметров для A/B и динамический порог публикации
+            algo = (get_system_param('cluster_scoring_algo', 'improved') or 'improved').lower()
+            try:
+                min_score_param = float(get_system_param('cluster_min_score', str(min_score)) or min_score)
+            except Exception:
+                min_score_param = min_score
+            score_to_use = improved_score if algo == 'improved' else baseline_score
+            if score_to_use >= min_score_param:
                 main_post = get_main_post_for_cluster(cluster_id)
                 if not main_post:
                     logger.warning(f"Главный пост {main_post_id} не найден в кластере {cluster_id}")
@@ -149,7 +168,7 @@ async def engagement_publisher_task(bot, interval=30, min_score=0.5):
                     logger.info(f"Нет пользователей для поста {main_post_id} канала {main_post['channel_tg_id']}")
                     continue
                 await publish_main_post(bot, users, main_post)
-                logger.info(f"Кластер {cluster_id} опубликован с score={score:.4f}")
+                logger.info(f"Кластер {cluster_id} опубликован с score={score_to_use:.4f} (algo={algo}, min={min_score_param:.3f})")
                 archive_cluster(cluster_id)
         await asyncio.sleep(interval)
 
@@ -159,7 +178,30 @@ async def ad_filter_task(interval=30, ad_threshold=0.4):
         try:
             active_posts = get_posts_in_active_clusters()
             for post in active_posts:
-                is_ad = process_post_for_ad_check(post, ad_threshold)
+                try:
+                    dynamic_threshold = float(get_system_param('ad_threshold', str(ad_threshold)) or ad_threshold)
+                except Exception:
+                    dynamic_threshold = ad_threshold
+                is_ad = process_post_for_ad_check(post, dynamic_threshold)
         except Exception as e:
             logger.error(f"Ошибка в ad_filter_task: {e}")
         await asyncio.sleep(interval)
+
+
+async def reputation_refresher_task(interval_seconds: int = 21600):
+    """
+    Периодически пересчитывает репутацию каналов, встречающихся в активных кластерах.
+    По умолчанию каждые 6 часов.
+    """
+    while True:
+        try:
+            posts = get_posts_in_active_clusters()
+            channel_ids = sorted({p['channel_tg_id'] for p in posts})
+            for ch_id in channel_ids:
+                try:
+                    recalc_channel_reputation(ch_id)
+                except Exception as e:
+                    logger.error(f"Ошибка пересчёта репутации канала {ch_id}: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка в reputation_refresher_task: {e}")
+        await asyncio.sleep(interval_seconds)

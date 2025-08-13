@@ -1,6 +1,7 @@
 import math
 import os
 from database.db_connection import get_channel_category, get_category_users
+from typing import List, Dict
 
 
 def remove_file(filenames_list):
@@ -21,25 +22,50 @@ def get_users_for_post(channel_tg_id):
 
 
 def compute_heat_score(views, reactions, comments, forwards,
-                       a=1, b=1.5, c=2, alpha=1):
+                       a=1, b=1.5, c=2, alpha=1,
+                       dt_hours: float | None = None,
+                       time_decay_half_life_h: float = 6.0):
+    """
+    Тепловой скоринг поста с учётом динамики (временной распад):
+    heat = sigmoid((a*reactions + b*comments + c*forwards) / (views^alpha + 1)) * time_decay
+    где time_decay = 0.5 ** (dt_hours / half_life)
+    """
     numerator = a * reactions + b * comments + c * forwards
-    denominator = views ** alpha + 1
-    x = numerator / denominator
-    return sigmoid(x)
+    denominator = (views ** alpha) + 1
+    base = numerator / denominator if denominator > 0 else 0.0
+    time_decay = 1.0
+    if dt_hours is not None and dt_hours >= 0:
+        time_decay = 0.5 ** (dt_hours / max(0.1, time_decay_half_life_h))
+    return sigmoid(base) * time_decay
 
 
-def compute_cluster_score(cluster_posts, a=1, b=1.5, c=2, alpha=1):
+def compute_cluster_score(cluster_posts: List[Dict], a=1, b=1.5, c=2, alpha=1,
+                          channel_reputation_weight: float = 0.3,
+                          diversity_weight: float = 0.2):
+    """
+    Улучшенный скоринг кластера:
+    - Engagement rate склеенный по кластеру
+    - Мультипликатор разнообразия источников (логарифм числа уникальных каналов)
+    - Средняя репутация каналов в кластере
+    score = sigmoid(ER * 10) * (1 + diversity_weight * log(1 + unique_channels)) * (1 - channel_reputation_weight + channel_reputation_weight * avg_rep)
+    """
     total_views = sum(p['views'] for p in cluster_posts)
     total_reactions = sum(p['reactions'] for p in cluster_posts)
     total_comments = sum(p['comments'] for p in cluster_posts)
     total_forwards = sum(p['forwards'] for p in cluster_posts)
     unique_channels = len(set(p['channel_id'] for p in cluster_posts))
+    avg_rep = None
+    reps = [p.get('channel_reputation') for p in cluster_posts if p.get('channel_reputation') is not None]
+    if reps:
+        avg_rep = sum(reps) / len(reps)
+    else:
+        avg_rep = 0.5
 
     numerator = a * total_reactions + b * total_comments + c * total_forwards
-    denominator = total_views ** alpha + 1
-    er = numerator / denominator
+    denominator = (total_views ** alpha) + 1
+    er = numerator / denominator if denominator > 0 else 0.0
 
-    heat_multiplier = math.log(unique_channels + 1)
-    score = sigmoid(er * 10) * heat_multiplier
-
+    diversity_multiplier = 1.0 + diversity_weight * math.log(unique_channels + 1)
+    reputation_multiplier = (1.0 - channel_reputation_weight) + channel_reputation_weight * avg_rep
+    score = sigmoid(er * 10) * diversity_multiplier * reputation_multiplier
     return score

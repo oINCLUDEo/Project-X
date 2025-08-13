@@ -5,7 +5,7 @@ from config.config import load_config
 from database.db_connection import *
 from telethon_client.start_telethon import setup_handlers, update_engagement_for_active_cluster_posts
 from aiogram_bot.handlers import user_handlers
-from telethon_client.handlers.handler_utils import engagement_publisher_task, ad_filter_task
+from telethon_client.handlers.handler_utils import engagement_publisher_task, ad_filter_task, reputation_refresher_task
 
 from aiogram import Bot, Dispatcher
 from telethon import TelegramClient
@@ -56,7 +56,8 @@ async def start_aiogram():
 
 async def main():
     publisher = asyncio.create_task(engagement_publisher_task(bot))
-    await asyncio.gather(start_telethon(), start_aiogram(), publisher) # Запуск Бота, Телеграм Парсера и публикации кластеров асинхронно
+    reputation = asyncio.create_task(reputation_refresher_task())
+    await asyncio.gather(start_telethon(), start_aiogram(), publisher, reputation) # Запуск Бота, Телеграм Парсера и публикации кластеров асинхронно
 
 
 # TODO: Надо расстащить куски аиограм и телетон в два модуля оставив тут мейн

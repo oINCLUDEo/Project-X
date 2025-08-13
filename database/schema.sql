@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS channels (
     description TEXT,
     subscribers_count INTEGER DEFAULT 0,
     is_active BOOLEAN DEFAULT TRUE,
+    reputation_score REAL DEFAULT 0.5,
+    ad_ratio REAL DEFAULT 0.0,
+    quality_score REAL DEFAULT 0.0,
+    last_reputation_update TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -46,6 +50,11 @@ CREATE TABLE IF NOT EXISTS posts (
     comments_count INTEGER DEFAULT 0,
     forwards_count INTEGER DEFAULT 0,
     engagement_score REAL DEFAULT 0,
+    last_engagement_update TIMESTAMP WITH TIME ZONE,
+    prev_views_count INTEGER DEFAULT 0,
+    prev_reactions_count INTEGER DEFAULT 0,
+    prev_comments_count INTEGER DEFAULT 0,
+    prev_forwards_count INTEGER DEFAULT 0,
     status VARCHAR(16) DEFAULT 'active',
     message_id BIGINT
 );
@@ -104,6 +113,8 @@ CREATE INDEX IF NOT EXISTS idx_user_news_is_read ON user_posts(is_read);
 CREATE INDEX IF NOT EXISTS idx_channels_is_active ON channels(is_active);
 CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
+CREATE INDEX IF NOT EXISTS idx_cluster_posts_cluster_id ON cluster_posts(cluster_id);
+CREATE INDEX IF NOT EXISTS idx_cluster_posts_post_id ON cluster_posts(post_id);
 
 -- Уникальность поста в рамках канала по message_id
 CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_channel_message ON posts(channel_tg_id, message_id);
@@ -225,3 +236,21 @@ CREATE TABLE IF NOT EXISTS model_versions (
     version VARCHAR(64) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Системные параметры (ключ-значение) для онлайн-калибровки/настроек
+CREATE TABLE IF NOT EXISTS system_params (
+    param_key VARCHAR(128) PRIMARY KEY,
+    param_value TEXT NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Логи скоринга кластеров для A/B и визуализации
+CREATE TABLE IF NOT EXISTS cluster_scores (
+    id SERIAL PRIMARY KEY,
+    cluster_id INTEGER REFERENCES clusters(cluster_id) ON DELETE CASCADE,
+    algorithm VARCHAR(32) NOT NULL, -- 'baseline' | 'improved'
+    score REAL NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_scores_cluster_id ON cluster_scores(cluster_id);

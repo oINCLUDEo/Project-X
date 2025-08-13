@@ -12,7 +12,8 @@ from database.db_connection import (
     get_post_content_by_id,
     insert_ad_decision,
     get_ad_label_for_post,
-    increment_pattern_cache
+    increment_pattern_cache,
+    get_channel_reputation_by_post_id
 )
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,10 @@ def compute_ad_score(post, past_posts_texts, heat_score, channel_trust_level,
         cta_count = len(RE_CTA.findall(text))
         cta_score = min(cta_count / 3, 1.0)
 
-        # 4. Suspicious engagement
-        suspicious_engagement = 1.0 if heat_score > 0.8 and channel_trust_level < 0.3 else 0.0
+        # 4. Suspicious engagement, учитывая репутацию источника
+        channel_rep = get_channel_reputation_by_post_id(post['post_id'])
+        trust = max(channel_trust_level, channel_rep)
+        suspicious_engagement = 1.0 if heat_score > 0.8 and trust < 0.3 else 0.0
 
         # 5. Template similarity
         template_similarity = 0.0

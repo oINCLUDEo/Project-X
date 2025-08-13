@@ -3,6 +3,7 @@ import os
 from config.config import load_config
 
 from helpers.helpers import compute_heat_score
+from database.db_connection import get_post_prev_metrics
 from telethon_client.handlers.album_handler import album_handler
 from telethon_client.handlers.default_handler import default_handler
 from database.db_connection import get_posts_in_active_clusters, update_post_engagement
@@ -48,8 +49,20 @@ async def update_engagement_for_active_cluster_posts(client, interval=30):
                         sum(r.count for r in m.reactions.results) if m.reactions and m.reactions.results else 0
                         for m in group
                     )
+                    prev = get_post_prev_metrics(post_id) or {}
+                    # Рассчитываем dt в часах от последнего апдейта, если доступно
+                    import datetime
+                    dt_hours = None
+                    try:
+                        last_update = prev.get('last_update') or prev.get('published_at')
+                        if last_update:
+                            dt = datetime.datetime.utcnow().replace(tzinfo=None) - last_update.replace(tzinfo=None)
+                            dt_hours = max(0.0, dt.total_seconds() / 3600.0)
+                    except Exception:
+                        dt_hours = None
+
                     score = compute_heat_score(
-                        total_views, total_reactions, total_comments, total_forwards
+                        total_views, total_reactions, total_comments, total_forwards, dt_hours=dt_hours
                     )
                     update_post_engagement(post_id, total_views, total_reactions, total_comments, total_forwards, score)
                     logger.info(
