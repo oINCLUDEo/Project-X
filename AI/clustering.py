@@ -24,7 +24,7 @@ def process_post_and_cluster(channel_tg_id: int, embedding: list[float], post_id
     Принимает уже рассчитанный embedding, чтобы избежать повторного вычисления.
     """
     # Получить последние n кластеров (например, 50)
-    recent_clusters = get_recent_clusters_with_embeddings(50)
+    recent_clusters = get_recent_clusters_with_embeddings(limit=1000)
 
     cluster_id, similarity = find_similar_cluster(embedding, recent_clusters)
 

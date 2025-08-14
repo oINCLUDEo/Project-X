@@ -30,7 +30,7 @@ loggers:
     propagate: false
 
   telethon_client:
-    level: INFO
+    level: DEBUG
     handlers: [file, default]
     propagate: false
 

@@ -15,7 +15,7 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_channel_tg_id_for_post', 'recalc_channel_reputation', 'get_post_prev_metrics',
            'get_channel_reputation', 'get_channel_reputation_by_post_id', 'get_cluster_metadata',
            'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores',
-           'record_user_feedback']
+           'record_user_feedback', 'get_cluster_posts_full']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -359,17 +359,26 @@ def add_post_to_cluster(cluster_id: int, post_id: int):
             cur.execute(query, (cluster_id, post_id))
 
 
-def get_recent_clusters_with_embeddings(limit=50) -> list[tuple[int, list[float]]]:
-    query = """
-        SELECT c.cluster_id, p.embedding
-        FROM clusters c
-        JOIN posts p ON c.main_post_id = p.post_id
-        ORDER BY c.created_at DESC
-        LIMIT %s;
+def get_recent_clusters_with_embeddings(limit: int | None = None) -> list[tuple[int, list[float]]]:
     """
+    Возвращает пары (cluster_id, embedding главного поста).
+    Если limit указан (int) — ограничивает количество, иначе возвращает все кластеры.
+    """
+    base_query = (
+        "SELECT c.cluster_id, p.embedding "
+        "FROM clusters c "
+        "JOIN posts p ON c.main_post_id = p.post_id "
+        "ORDER BY c.created_at DESC"
+    )
+    if limit is not None:
+        query = base_query + " LIMIT %s;"
+        params = (limit,)
+    else:
+        query = base_query + ";"
+        params = ()
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (limit,))
+            cur.execute(query, params)
             return [(row[0], row[1]) for row in cur.fetchall()]
 
 def get_expired_clusters():
@@ -411,6 +420,43 @@ def get_main_post_for_cluster(cluster_id):
         with conn.cursor() as cur:
             cur.execute(query, (cluster_id,))
             return cur.fetchone()  # row or None
+
+def get_cluster_posts_full(cluster_id: int):
+    """
+    Возвращает посты кластера с полями: post_id, channel_tg_id, content, media_urls, views_count,
+    reactions_count, comments_count, forwards_count.
+    """
+    query = """
+        SELECT 
+            p.post_id,
+            p.channel_tg_id,
+            p.content,
+            p.media_urls,
+            p.views_count,
+            p.reactions_count,
+            p.comments_count,
+            p.forwards_count
+        FROM cluster_posts cp
+        JOIN posts p ON cp.post_id = p.post_id
+        WHERE cp.cluster_id = %s;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cluster_id,))
+            rows = cur.fetchall()
+            posts = []
+            for r in rows:
+                posts.append({
+                    'post_id': r[0],
+                    'channel_tg_id': r[1],
+                    'content': r[2] or "",
+                    'media_urls': r[3],
+                    'views': r[4] or 0,
+                    'reactions': r[5] or 0,
+                    'comments': r[6] or 0,
+                    'forwards': r[7] or 0,
+                })
+            return posts
 
 def delete_cluster(cluster_id):
     """

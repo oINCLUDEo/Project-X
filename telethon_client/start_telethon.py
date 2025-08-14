@@ -10,7 +10,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-async def update_engagement_for_active_cluster_posts(client, interval=30):
+async def update_engagement_for_active_cluster_posts(client, interval=300):
     """
     Обновляет engagement-показатели (views, reactions, comments, forwards, score) для всех постов в активных кластерах.
     Корректно обрабатывает альбомы (grouped_id) путём суммирования engagement по группе сообщений.
@@ -32,13 +32,13 @@ async def update_engagement_for_active_cluster_posts(client, interval=30):
                     msg = msg_raw[0] if isinstance(msg_raw, list) or hasattr(msg_raw, '__iter__') else msg_raw
                     if msg.grouped_id:
                         # Обрабатываем как альбом
-                        logger.info(f'[ENGAGEMENT] Обнаружен grouped_id={msg.grouped_id}, ищем сообщения в альбоме...')
+                        logger.debug(f'[ENGAGEMENT] Обнаружен grouped_id={msg.grouped_id}, ищем сообщения в альбоме...')
                         recent_msgs = await client.get_messages(channel_id, limit=20)
                         group = [m for m in recent_msgs if m.grouped_id == msg.grouped_id]
-                        logger.info(f'[ENGAGEMENT] Найдено {len(group)} сообщений в альбоме.')
+                        logger.debug(f'[ENGAGEMENT] Найдено {len(group)} сообщений в альбоме.')
                     else:
                         group = [msg]
-                        logger.info(f'[ENGAGEMENT] Одиночное сообщение.')
+                        logger.debug(f'[ENGAGEMENT] Одиночное сообщение.')
 
                     # Сбор статистики
                     total_views = sum(m.views or 0 for m in group)

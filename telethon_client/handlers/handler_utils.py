@@ -1,11 +1,15 @@
 import logging
+import time
 import asyncio
+import datetime
+from datetime import timezone
 from telethon import utils
+import html as _html
 from database.db_connection import get_channel_category, get_category_users, add_post, get_expired_clusters, \
     get_main_post_for_cluster, get_active_clusters, get_posts_by_cluster, archive_cluster, get_posts_in_active_clusters, \
     update_post_status, get_cluster_id_by_post, update_cluster_status, \
     get_posts_by_cluster_with_reputation, log_cluster_score, get_system_param, recalc_channel_reputation, \
-    get_cluster_metadata, get_latest_cluster_scores, get_recent_clusters
+    get_cluster_metadata, get_latest_cluster_scores, get_recent_clusters, get_cluster_posts_full
 from AI.Ai_Functions import get_embedding
 from AI.clustering import process_post_and_cluster
 from aiogram.utils.media_group import MediaGroupBuilder
@@ -16,6 +20,7 @@ from aiogram_bot.keyboards import get_feedback_keyboard
 from helpers.ad_helper import compute_ad_score, process_post_for_ad_check
 from AI.Ai_Functions import predict_ad_probability, get_embedding
 from helpers.helpers import compute_cluster_score, get_users_for_post
+from AI.content_generator import generate_unique_content
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +73,58 @@ def process_ai_and_clustering(msg_from_channel_id, message_text, media_urls=None
 
 
 # --- Универсальная публикация главного поста ---
+def _sanitize_caption(text: str) -> str:
+    """Простая очистка текста для безопасной отправки (убирает HTML-теги только в последней строке)."""
+    if not text:
+        return ""
+    try:
+        import re
+        
+        # Логируем исходный текст для диагностики
+        logger.debug(f"[SANITIZE] Input text (first 200 chars): {text[:200].encode('ascii', 'ignore').decode('ascii')}...")
+        
+        # Разбиваем на строки
+        lines = text.split('\n')
+        
+        if len(lines) > 1:
+            # Фильтруем строки, убирая рекламные ссылки
+            filtered_lines = []
+            for line in lines:
+                # Если строка содержит HTML-ссылку, пропускаем её
+                if re.search(r'<a\s+href=', line):
+                    continue
+                # Если строка содержит только эмодзи и рекламные слова, пропускаем
+                if re.match(r'^[^\w]*?(подписывайся|подписаться|присылай|новости|инсайд)[^\w]*$', line, re.IGNORECASE):
+                    continue
+                filtered_lines.append(line)
+            
+            # Собираем обратно
+            text = '\n'.join(filtered_lines)
+        else:
+            # Если только одна строка, убираем HTML-теги везде
+            text = re.sub(r'<[^>]*>', '', text)
+            text = re.sub(r'&[a-zA-Z0-9#]+;', '', text)
+        
+        logger.debug(f"[SANITIZE] Output text (first 200 chars): {text[:200].encode('ascii', 'ignore').decode('ascii')}...")
+        
+        return text
+    except Exception as e:
+        logger.error(f"[SANITIZE] Error processing text: {e}", exc_info=True)
+        return text
 async def publish_main_post(bot, users, post_row):
-    content = post_row[2]
+    # Сначала санитизируем основной контент
+    content = _sanitize_caption(post_row[2])
+    
+    # Затем добавляем рекламу, если она есть
+    try:
+        native_ad = get_system_param('native_ad_snippet', None)
+        if native_ad and native_ad.strip():
+            content = content.strip() + "\n\n" + native_ad.strip()
+            # Безопасное логирование рекламы (без эмодзи)
+            safe_ad = native_ad.strip().encode('ascii', 'ignore').decode('ascii')
+            logger.debug(f"[PUBLISH] Added native ad: '{safe_ad}'")
+    except Exception as e:
+        logger.warning(f"[PUBLISH] Failed to add native ad: {e}")
     media_urls = post_row[3] or []
     if isinstance(media_urls, str):
         import ast
@@ -127,11 +182,12 @@ async def publish_main_post(bot, users, post_row):
         await send_to_users(
             bot, users, bot.send_message,
             text=content,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_feedback_keyboard(post_row[0])
         )
 
 
-async def engagement_publisher_task(bot, interval=90, min_score=0.5):
+async def engagement_publisher_task(bot, interval=300, min_score=0.5):
     """
     Периодически проверяет engagement кластеров и публикует, если score >= min_score.
 
@@ -143,6 +199,7 @@ async def engagement_publisher_task(bot, interval=90, min_score=0.5):
     """
     while True:
         active_clusters = get_active_clusters()  # [(cluster_id, main_post_id), ...]
+        logger.info(f"[PUBLISH] Активных кластеров: {len(active_clusters)}; interval={interval}s, base_min_score={min_score}")
         for cluster_id, main_post_id in active_clusters:
             # A/B: baseline vs improved
             cluster_posts = get_posts_by_cluster(cluster_id)
@@ -157,9 +214,9 @@ async def engagement_publisher_task(bot, interval=90, min_score=0.5):
             try:
                 log_cluster_score(cluster_id, 'baseline', baseline_score)
                 log_cluster_score(cluster_id, 'improved', improved_score)
-            except Exception:
-                pass
-            logger.info(f"Кластер {cluster_id} baseline={baseline_score:.4f} improved={improved_score:.4f}")
+            except Exception as e:
+                logger.error(f"[PUBLISH] Ошибка логирования cluster_scores для cluster={cluster_id}: {e}")
+            logger.info(f"[PUBLISH] Кластер {cluster_id}: posts={len(cluster_posts)}, posts_w_rep={len(improved_posts)}, baseline={baseline_score:.4f}, improved={improved_score:.4f}")
 
             # Выбор алгоритма из системных параметров для A/B
             algo = (get_system_param('cluster_scoring_algo', 'improved') or 'improved').lower()
@@ -170,6 +227,7 @@ async def engagement_publisher_task(bot, interval=90, min_score=0.5):
             score_to_use = improved_score if algo == 'improved' else baseline_score
             # Ужесточаем базовый порог
             effective_threshold = max(0.65, min_score_param)
+            logger.debug(f"[PUBLISH] Кластер {cluster_id}: algo={algo}, min_score_param={min_score_param}, effective_threshold={effective_threshold:.3f}")
             # Гибкая задержка публикации: учитываем относительность в сравнении с другими кластерами в окне времени
             try:
                 min_age_minutes = int(get_system_param('cluster_min_age_minutes', '10') or '10')
@@ -181,16 +239,17 @@ async def engagement_publisher_task(bot, interval=90, min_score=0.5):
                 min_posts_in_cluster = 3
 
             meta = get_cluster_metadata(cluster_id) or {}
-            import datetime
             meets_age = False
             try:
                 created_at = meta.get('created_at')
                 if created_at:
-                    dt = datetime.datetime.utcnow().replace(tzinfo=None) - created_at.replace(tzinfo=None)
-                    meets_age = (dt.total_seconds() / 60.0) >= min_age_minutes
+                    age_minutes = (datetime.datetime.now() - created_at).total_seconds() / 60.0
+                    meets_age = age_minutes >= min_age_minutes
+                    logger.debug(f"[PUBLISH] Кластер {cluster_id}: age_minutes={age_minutes:.1f}, min_age={min_age_minutes}")
             except Exception:
                 meets_age = False
             meets_volume = (meta.get('post_count') or 0) >= min_posts_in_cluster
+            logger.debug(f"[PUBLISH] Кластер {cluster_id}: created_at={meta.get('created_at')}, age_ok={meets_age} (min_age={min_age_minutes}m), volume_ok={meets_volume} (count={meta.get('post_count')}, min={min_posts_in_cluster})")
 
             # Дополнительно: динамический «перцентильный» фильтр по скору в окне времени
             # Публикуем только кластеры из топ-квантили (например, 70-й перцентиль) текущего окна
@@ -212,8 +271,16 @@ async def engagement_publisher_task(bot, interval=90, min_score=0.5):
             else:
                 percentile_cutoff = effective_threshold
             dynamic_cutoff = max(effective_threshold, percentile_cutoff)
+            logger.info(f"[PUBLISH] Кластер {cluster_id}: window={window_minutes}m, percentile={min_percentile:.2f}, cutoff={dynamic_cutoff:.3f}, score={score_to_use:.4f}")
 
-            if score_to_use >= dynamic_cutoff and meets_age and meets_volume:
+            # Опциональный обход возрастного порога при очень высоком score (включается системным параметром)
+            try:
+                bypass_margin = float(get_system_param('cluster_age_bypass_margin', '0') or '0')
+            except Exception:
+                bypass_margin = 0.0
+            bypass_age = (bypass_margin > 0) and (score_to_use >= (dynamic_cutoff + bypass_margin)) and meets_volume
+
+            if (score_to_use >= dynamic_cutoff and meets_age and meets_volume) or bypass_age:
                 main_post = get_main_post_for_cluster(cluster_id)
                 if not main_post:
                     logger.warning(f"Главный пост {main_post_id} не найден в кластере {cluster_id}")
@@ -223,26 +290,48 @@ async def engagement_publisher_task(bot, interval=90, min_score=0.5):
                 if not users:
                     logger.info(f"Нет пользователей для поста {main_post_id} канала {channel_tg_id}")
                     continue
-                await publish_main_post(bot, users, main_post)
-                logger.info(f"Кластер {cluster_id} опубликован score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, age>={min_age_minutes}m, posts>={min_posts_in_cluster})")
-                archive_cluster(cluster_id)
-        await asyncio.sleep(interval)
-
-
-async def ad_filter_task(interval=90, ad_threshold=0.4):
-    while True:
-        try:
-            active_posts = get_posts_in_active_clusters()
-            for post in active_posts:
+                # Генерация уникального контента на основе всего кластера (можно отключить системным параметром)
                 try:
-                    dynamic_threshold = float(get_system_param('ad_threshold', str(ad_threshold)) or ad_threshold)
+                    gen_enabled_raw = (get_system_param('content_generation_enabled', '1') or '1').lower()
+                    gen_enabled = gen_enabled_raw in ('1', 'true', 'yes', 'on')
                 except Exception:
-                    dynamic_threshold = ad_threshold
-                # Ужесточаем: повышаем дефолтный порог; требуем более явные признаки
-                is_ad = process_post_for_ad_check(post, max(0.5, dynamic_threshold))
-        except Exception as e:
-            logger.error(f"Ошибка в ad_filter_task: {e}")
+                    gen_enabled = True
+                if gen_enabled:
+                    try:
+                        t0 = time.perf_counter()
+                        full_posts = get_cluster_posts_full(cluster_id)
+                        logger.info(f"[CONTENT] Начало генерации: cluster={cluster_id}, posts={len(full_posts)}")
+                        unique_text, meta = generate_unique_content(full_posts, method='auto')
+                        dt = (time.perf_counter() - t0) * 1000
+                        logger.info(f"[CONTENT] Генерация завершена: cluster={cluster_id}, ms={dt:.0f}, length={len(unique_text or '')}")
+                        if unique_text and unique_text.strip():
+                            # Подменяем контент главного поста
+                            as_list = list(main_post)
+                            as_list[2] = unique_text
+                            main_post = tuple(as_list)
+                    except Exception as e:
+                        logger.error(f"[CONTENT] Ошибка генерации уникального контента для кластера {cluster_id}: {e}", exc_info=True)
+                else:
+                    logger.info(f"[CONTENT] Генерация уникального контента отключена системным параметром для cluster={cluster_id}")
+                await publish_main_post(bot, users, main_post)
+                if bypass_age:
+                    logger.info(f"Кластер {cluster_id} опубликован (bypass age) score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, bypass_margin={bypass_margin:.3f}, posts>={min_posts_in_cluster})")
+                else:
+                    logger.info(f"Кластер {cluster_id} опубликован score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, age>={min_age_minutes}m, posts>={min_posts_in_cluster})")
+                archive_cluster(cluster_id)
+            else:
+                reasons = []
+                if score_to_use < dynamic_cutoff:
+                    reasons.append(f"score {score_to_use:.3f} < cutoff {dynamic_cutoff:.3f}")
+                if not meets_age:
+                    reasons.append(f"age<min ({min_age_minutes}m)")
+                if not meets_volume:
+                    reasons.append(f"posts<count_min ({min_posts_in_cluster})")
+                logger.info(f"[PUBLISH] Кластер {cluster_id} не опубликован: {', '.join(reasons)}")
         await asyncio.sleep(interval)
+
+
+# Удалён периодический ad_filter_task: проверка рекламы выполняется только при получении поста
 
 
 async def reputation_refresher_task(interval_seconds: int = 21600):

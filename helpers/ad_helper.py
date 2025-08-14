@@ -194,28 +194,28 @@ def process_post_for_ad_check(post, ad_threshold, channel_trust_level = 0.3, mod
             try:
                 ai_prob = float(model_pred_func(text))
             except Exception as e:
-                logger.error(f"AI model inference error for post {post['post_id']}: {e}")
+                logger.error(f"Ошибка вывода AI-модели для поста {post['post_id']}: {e}")
                 ai_prob = 0.0
             decision_stage2 = 'ad' if ai_prob >= ad_threshold else 'not_ad'
             insert_ad_decision(post['post_id'], 2, ai_prob, decision_stage2, model_version, None)
             is_ad = decision_stage2 == 'ad'
 
-        logger.info(f"[Ad Check] post_id={post['post_id']} stage1_score={ad_score:.3f} -> is_ad={is_ad}")
+        logger.debug(f"[Ad Check] post_id={post['post_id']} stage1_score={ad_score:.3f} -> is_ad={is_ad}")
 
         # Если есть ручная разметка — переопределяем решение
         label = get_ad_label_for_post(post['post_id'])
         if label:
             is_ad = label['label'] == 'ad'
-            logger.info(f"[Ad Check] Overridden by manual label: {label['label']}")
+            logger.info(f"[Ad Check] Переопределено ручной разметкой: {label['label']}")
 
         if is_ad:
             update_post_status(post['post_id'], "ad")
             cluster_id = get_cluster_id_by_post(post['post_id'])
             if cluster_id:
                 update_cluster_status(cluster_id, "ad")
-                logger.info(f"Cluster {cluster_id} status updated to 'ad' due to post {post['post_id']}")
+                logger.info(f"[Ad Check] Статус кластера {cluster_id} обновлён на 'ad' из-за поста {post['post_id']}")
         else:
-            logger.info(f"Post {post['post_id']} remains active.")
+            logger.debug(f"[Ad Check] Пост {post['post_id']} остаётся активным.")
 
         return is_ad
     except Exception as e:
