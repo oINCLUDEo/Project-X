@@ -21,6 +21,7 @@ from helpers.ad_helper import compute_ad_score, process_post_for_ad_check
 from AI.Ai_Functions import predict_ad_probability, get_embedding
 from helpers.helpers import compute_cluster_score, get_users_for_post
 from AI.content_generator import generate_unique_content
+from AI.news_synthesizer import synthesize_news, synthesize_news_with_cache
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,20 @@ def get_media_type_by_path(path: str) -> str:
         return "unknown"
 
 async def send_to_users(bot, users, send_func, *args, **kwargs):
+    """Отправляет сообщение всем пользователям. Возвращает True если все отправки успешны."""
+    success_count = 0
+    total_users = len(users)
+    
     for user in users:
         try:
             await send_func(chat_id=user, *args, **kwargs)
             logger.info("Сообщение отправлено пользователю %s", user)
+            success_count += 1
         except Exception as e:
             logger.error("Ошибка отправки сообщения пользователю %s: %s", user, str(e))
+    
+    # Возвращаем True только если отправлено всем пользователям
+    return success_count == total_users
 
 def validate_post(event, type):
     if type == "album":
@@ -112,6 +121,7 @@ def _sanitize_caption(text: str) -> str:
         logger.error(f"[SANITIZE] Error processing text: {e}", exc_info=True)
         return text
 async def publish_main_post(bot, users, post_row):
+    """Публикует главный пост. Возвращает True если отправка успешна всем пользователям."""
     # Сначала санитизируем основной контент
     content = _sanitize_caption(post_row[2])
     
@@ -142,12 +152,12 @@ async def publish_main_post(bot, users, post_row):
         built = media_group.build()
         if len(built) > 10:
             built = built[:10]
-        await send_to_users(bot, users, bot.send_media_group, media=built)
+        return await send_to_users(bot, users, bot.send_media_group, media=built)
     elif len(media_urls) == 1:
         url = media_urls[0]
         mtype = get_media_type_by_path(url)
         if mtype == 'video':
-            await send_to_users(
+            return await send_to_users(
                 bot, users, bot.send_video,
                 video=types.FSInputFile(path=url),
                 caption=content,
@@ -155,7 +165,7 @@ async def publish_main_post(bot, users, post_row):
                 reply_markup=get_feedback_keyboard(post_row[0])
             )
         elif mtype == 'image':
-            await send_to_users(
+            return await send_to_users(
                 bot, users, bot.send_photo,
                 photo=types.FSInputFile(path=url),
                 caption=content,
@@ -163,7 +173,7 @@ async def publish_main_post(bot, users, post_row):
                 reply_markup=get_feedback_keyboard(post_row[0])
             )
         elif mtype == 'gif':
-            await send_to_users(
+            return await send_to_users(
                 bot, users, bot.send_animation,
                 animation=types.FSInputFile(path=url),
                 caption=content,
@@ -171,7 +181,7 @@ async def publish_main_post(bot, users, post_row):
                 reply_markup=get_feedback_keyboard(post_row[0])
             )
         else:
-            await send_to_users(
+            return await send_to_users(
                 bot, users, bot.send_message,
                 text=content,
                 parse_mode=ParseMode.HTML,
@@ -179,7 +189,7 @@ async def publish_main_post(bot, users, post_row):
             )
     else:
         # Только текст
-        await send_to_users(
+        return await send_to_users(
             bot, users, bot.send_message,
             text=content,
             parse_mode=ParseMode.HTML,
@@ -290,7 +300,7 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                 if not users:
                     logger.info(f"Нет пользователей для поста {main_post_id} канала {channel_tg_id}")
                     continue
-                # Генерация уникального контента на основе всего кластера (можно отключить системным параметром)
+                # Генерация уникального/синтезированного контента на основе всего кластера (включается системным параметром)
                 try:
                     gen_enabled_raw = (get_system_param('content_generation_enabled', '1') or '1').lower()
                     gen_enabled = gen_enabled_raw in ('1', 'true', 'yes', 'on')
@@ -301,9 +311,23 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                         t0 = time.perf_counter()
                         full_posts = get_cluster_posts_full(cluster_id)
                         logger.info(f"[CONTENT] Начало генерации: cluster={cluster_id}, posts={len(full_posts)}")
-                        unique_text, meta = generate_unique_content(full_posts, method='auto')
+                        # Выбор режима синтеза: 'A' (anchor+details) | 'B' (facts->write)
+                        mode = (get_system_param('content_generation_mode', 'A') or 'A').upper()
+                        if mode in ('A', 'B'):
+                            logger.info(f"[CONTENT] Используем современный генератор")
+                            unique_text, meta = synthesize_news_with_cache(cluster_id, full_posts, mode=mode)
+                            try:
+                                logger.info(
+                                    f"[CONTENT] meta: cached={meta.get('cached')} model={meta.get('model')} prompt_len={meta.get('prompt_len')} posts={meta.get('posts')}"
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            logger.info(f"[CONTENT] Используем простой старый генератор")
+                            # Фолбэк: прежний простой генератор
+                            unique_text, meta = generate_unique_content(full_posts, method='auto')
                         dt = (time.perf_counter() - t0) * 1000
-                        logger.info(f"[CONTENT] Генерация завершена: cluster={cluster_id}, ms={dt:.0f}, length={len(unique_text or '')}")
+                        logger.info(f"[CONTENT] Генерация завершена: cluster={cluster_id}, mode={mode}, ms={dt:.0f}, length={len(unique_text or '')}")
                         if unique_text and unique_text.strip():
                             # Подменяем контент главного поста
                             as_list = list(main_post)
@@ -313,12 +337,16 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                         logger.error(f"[CONTENT] Ошибка генерации уникального контента для кластера {cluster_id}: {e}", exc_info=True)
                 else:
                     logger.info(f"[CONTENT] Генерация уникального контента отключена системным параметром для cluster={cluster_id}")
-                await publish_main_post(bot, users, main_post)
-                if bypass_age:
-                    logger.info(f"Кластер {cluster_id} опубликован (bypass age) score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, bypass_margin={bypass_margin:.3f}, posts>={min_posts_in_cluster})")
+                # Атомарная отправка: архивируем только при успешной отправке всем пользователям
+                publish_success = await publish_main_post(bot, users, main_post)
+                if publish_success:
+                    if bypass_age:
+                        logger.info(f"Кластер {cluster_id} опубликован (bypass age) score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, bypass_margin={bypass_margin:.3f}, posts>={min_posts_in_cluster})")
+                    else:
+                        logger.info(f"Кластер {cluster_id} опубликован score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, age>={min_age_minutes}m, posts>={min_posts_in_cluster})")
+                    archive_cluster(cluster_id)
                 else:
-                    logger.info(f"Кластер {cluster_id} опубликован score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, age>={min_age_minutes}m, posts>={min_posts_in_cluster})")
-                archive_cluster(cluster_id)
+                    logger.error(f"Кластер {cluster_id} НЕ опубликован из-за ошибок отправки - статус не изменён")
             else:
                 reasons = []
                 if score_to_use < dynamic_cutoff:
