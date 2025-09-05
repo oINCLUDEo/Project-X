@@ -74,7 +74,7 @@ def get_category_users(category_ids):
             FROM users u 
             JOIN user_categories uc ON u.user_id = uc.user_id 
             WHERE uc.category_id = ANY(%s)
-            AND u.is_active = TRUE;
+            AND u.status = 'active';
             """
     try:
         with _get_db_connection() as conn:
@@ -110,12 +110,12 @@ def get_channel_category(channel_tg_id: int) -> list[int]:
             logger.info("Получены категории %s для канала %s", categories, channel_tg_id)
             return categories
 
-def add_user(user_tg_id):
-    query = "INSERT INTO users(user_tg_id) VALUES (%s);"
+def add_user(user_tg_id, username, first_name, full_name):
+    query = "INSERT INTO users(user_tg_id, username, first_name, full_name) VALUES (%s, %s, %s, %s);"
     try:
         with _get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, (user_tg_id,))
+                cur.execute(query, (user_tg_id, username, first_name, full_name,))
 
         logger.info("Пользователь успешно добавлен!")
     except psycopg2.IntegrityError:

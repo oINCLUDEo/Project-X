@@ -13,8 +13,11 @@ logger = logging.getLogger(__name__) # Создание логгера под ф
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     user_tg_id : int = message.from_user.id
-    logger.debug("Запрос на добавление пользователя - ", user_tg_id)
-    add_user(user_tg_id)
+    username : str = message.from_user.username
+    first_name : str = message.from_user.first_name
+    full_name : str = message.from_user.full_name
+    logger.debug("Запрос на добавление пользователя - ", user_tg_id, full_name)
+    add_user(user_tg_id, username, first_name, full_name)
 
 
 @router.callback_query(lambda c: c.data.startswith(('like_', 'dislike_')))
