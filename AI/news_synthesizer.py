@@ -1,8 +1,8 @@
 import os
 import logging
 from typing import List, Dict, Tuple
-import hashlib
 import re
+import time
 
 try:
     # OpenAI SDK v1.x
@@ -12,8 +12,7 @@ except Exception:  # pragma: no cover
 
 from helpers.helpers import compute_heat_score
 from database.db_connection import (
-    get_cached_generated_article,
-    put_cached_generated_article,
+    get_system_param,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,7 +20,18 @@ logger = logging.getLogger(__name__)
 
 def _select_anchor_post(cluster_posts: List[Dict]) -> Dict:
     """
-    Выбирает якорный пост по комбинации метрик вовлечённости и длины текста.
+    Выбирает якорный (основной) пост из кластера для использования в качестве базы для генерации.
+    
+    Алгоритм выбора:
+    - Вычисляет heat score (метрика вовлеченности) для каждого поста
+    - Добавляет бонус за длину текста (до 1000 символов)
+    - Возвращает пост с наивысшим комбинированным score
+    
+    Args:
+        cluster_posts: Список постов кластера с полями views, reactions, comments, forwards, content
+        
+    Returns:
+        Dict: Выбранный якорный пост или пустой словарь если кластер пустой
     """
     if not cluster_posts:
         return {}
@@ -43,338 +53,606 @@ def _select_anchor_post(cluster_posts: List[Dict]) -> Dict:
     return scored[0][1]
 
 
-def _truncate_text(text: str, max_chars: int) -> str:
-    if not text:
-        return ""
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _get_style_prefs() -> Dict:
+    """
+    Читает системные параметры стиля из базы данных и возвращает словарь настроек.
+    
+    Параметры:
+    - content_style: auto|news|entertainment
+    - content_tone: neutral|lively  
+    - content_headings_enabled: разрешить явные заголовки
+    - content_emojis_max: максимальное количество эмодзи (0-3)
+    
+    Returns:
+        Dict: Словарь с настройками стиля
+    """
+    try:
+        style = (get_system_param('content_style', 'auto'))
+    except Exception:
+        style = 'auto'
+    try:
+        tone = (get_system_param('content_tone', 'neutral'))
+    except Exception:
+        tone = 'neutral'
+    try:
+        headings = (get_system_param('content_headings_enabled', '0'))
+    except Exception:
+        headings = False
+    try:
+        emojis_max = int(get_system_param('content_emojis_max', '1'))
+        if emojis_max < 0:
+            emojis_max = 0
+    except Exception:
+        emojis_max = 1
+    return {
+        'style': style,         # auto|news|entertainment
+        'tone': tone,           # neutral|lively
+        'headings': headings,   # True => разрешить явные заголовки
+        'emojis_max': emojis_max,
+    }
+
+
+def _get_length_prefs() -> Dict:
+    """
+    Читает параметры длины и структуры текста из системных параметров.
+    
+    Параметры:
+    - content_len_mode: auto|short|long
+    - content_min_paragraphs: минимальное количество абзацев
+    - content_max_paragraphs: максимальное количество абзацев
+    - content_allow_headline_only: разрешить только заголовок
+    
+    Returns:
+        Dict: Словарь с настройками длины
+    """
+    try:
+        mode = (get_system_param('content_len_mode', 'auto') or 'auto').lower()  # auto|short|long
+    except Exception:
+        mode = 'auto'
+    try:
+        min_p = max(1, int(get_system_param('content_min_paragraphs', '1') or '1'))
+    except Exception:
+        min_p = 1
+    try:
+        max_p = max(min_p, int(get_system_param('content_max_paragraphs', '6') or '6'))
+    except Exception:
+        max_p = 6
+    try:
+        allow_headline_only = (get_system_param('content_allow_headline_only', '1') or '1')
+    except Exception:
+        allow_headline_only = True
+    return {
+        'mode': mode,
+        'min_p': min_p,
+        'max_p': max_p,
+        'allow_headline_only': allow_headline_only,
+    }
+
+
+def _text_to_shingles(text: str, k: int = 5) -> set:
+    """
+    Разбивает текст на шинглы (последовательности слов) для оценки новизны контента.
+    
+    Шинглы используются для определения уникальности текста путем сравнения
+    последовательностей слов между разными постами.
+    
+    Args:
+        text: Исходный текст
+        k: Размер шингла (количество слов в последовательности)
+        
+    Returns:
+        set: Множество шинглов из текста
+    """
+    tokens = re.findall(r"\w+", (text or '').lower(), flags=re.UNICODE)
+    if len(tokens) < k:
+        return set([" ".join(tokens)]) if tokens else set()
+    return set(" ".join(tokens[i:i+k]) for i in range(len(tokens)-k+1))
+
+
+def _compute_novelty_score(posts: List[Dict]) -> float:
+    """
+    Вычисляет метрику новизны фактов в кластере постов.
+    
+    Алгоритм:
+    1. Выбирает якорный пост (лучший по метрикам)
+    2. Извлекает шинглы из якорного поста
+    3. Считает долю шинглов из других постов, которых нет в якоре
+    4. Возвращает значение 0..1 (0 = ничего нового, 1 = много новых фактов)
+    
+    Args:
+        posts: Список постов кластера
+        
+    Returns:
+        float: Метрика новизны от 0 до 1.5
+    """
+    anchor = _select_anchor_post(posts)
+    anchor_shingles = _text_to_shingles(anchor.get('content'))
+    union_new = set()
+    total_shingles = 0
+    for p in posts:
+        sh = _text_to_shingles(p.get('content') or '')
+        total_shingles += len(sh)
+        union_new |= (sh - anchor_shingles)
+    if total_shingles <= 0:
+        return 0.0
+    # Ограничим долю, чтобы шум не раздувал метрику
+    score = min(1.5, len(union_new) / max(1, total_shingles))
+    return float(score)
+
+
+def _compute_avg_var_len(posts: List[Dict]) -> Tuple[float, float, int]:
+    """
+    Вычисляет статистики длины текстов в кластере постов.
+    
+    Args:
+        posts: Список постов кластера
+        
+    Returns:
+        Tuple[float, float, int]: (средняя длина, дисперсия длины, количество постов)
+    """
+    lengths = [len((p.get('content') or '').strip()) for p in posts]
+    if not lengths:
+        return 0.0, 0.0, 0
+    n = len(lengths)
+    avg = sum(lengths) / n
+    var = sum((L - avg) ** 2 for L in lengths) / n
+    return float(avg), float(var), n
+
+
+def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, novelty: float, style: str, tone: str) -> Tuple[int, int]:
+    """
+    Вычисляет оптимальное количество абзацев для генерируемого текста на основе метрик контента.
+    
+    Алгоритм:
+    1. Определяет базовый диапазон по средней длине постов
+    2. Добавляет бонусы за высокую дисперсию длин и новизну фактов
+    3. Применяет ограничения стиля (entertainment = короче)
+    4. Учитывает системные параметры min/max абзацев
+    
+    Args:
+        avg_len: Средняя длина постов в символах
+        var_len: Дисперсия длин постов
+        novelty: Метрика новизны фактов (0..1)
+        style: Стиль контента (auto|news|entertainment)
+        tone: Тон контента (neutral|lively)
+        
+    Returns:
+        Tuple[int, int]: (минимальное количество абзацев, максимальное количество абзацев)
+    """
+    lp = _get_length_prefs()
+    # База по среднему размеру
+    if lp['mode'] == 'short':
+        base_min, base_max = max(1, lp['min_p']), max(1, min(2, lp['max_p']))
+    elif lp['mode'] == 'long':
+        base_min, base_max = max(2, lp['min_p']), max(3, lp['max_p'])
+    else:
+        if avg_len < 600:
+            base_min, base_max = 1, max(1, min(2, lp['max_p']))
+        elif avg_len < 1400:
+            base_min, base_max = max(2, lp['min_p']), max(3, lp['max_p'])
+        else:
+            base_min, base_max = max(3, lp['min_p']), max(5, lp['max_p'])
+    # Усилители: разброс и новизна
+    bump = 0
+    if var_len > 80000:  # ~разброс длин высок
+        bump += 1
+    if novelty > 0.3:    # достаточно новых фрагментов
+        bump += 1
+    # TODO: Странный момент разобрать надо
+    min_p = min(lp['max_p'], base_min + bump)
+    max_p = min(lp['max_p'], base_max + bump)
+    # Стильные ограничения
+    if style == 'entertainment':
+        max_p = max(min_p, min(max_p, 3))
+    if min_p > max_p:
+        min_p = max_p
+    return min_p, max_p
+
+
+def _compose_style_instructions() -> str:
+    """
+    Формирует инструкции по стилю для LLM на основе системных параметров.
+    
+    Включает:
+    - Настройки заголовков
+    - Тональность (нейтральная/живая)
+    - Стиль по типу контента (новости/развлечения)
+    - Ограничения на эмодзи
+    - Разрешенные HTML теги для Telegram
+    - Запрещенные элементы форматирования
+    
+    Returns:
+        str: Текст инструкций для LLM
+    """
+    prefs = _get_style_prefs()
+    parts: List[str] = []
+    # Заголовки
+    if not prefs['headings']:
+        parts.append("Не вставляй явные заголовки разделов вроде 'Лид', 'Детали' — пиши цельный текст.")
+    # Тональность
+    if prefs['tone'] == 'lively':
+        parts.append("Лёгкая динамика допускается, но без эмоций и без оценочных суждений.")
+    else:
+        parts.append("Строго нейтральный информационный стиль.")
+    # Стиль по типу контента
+    if prefs['style'] == 'entertainment':
+        parts.append("Стиль: развлекательный канал — допускай более разговорную подачу, но без сленга и без эмоциональных оценок.")
+    elif prefs['style'] == 'news':
+        parts.append("Стиль: новостная заметка — кратко, фактически, без воды.")
+    else:
+        parts.append("Стиль: автоматически подбери между сжатой заметкой и мягкой подачей, сохраняя фактичность.")
+    # Эмодзи
+    if prefs['emojis_max'] <= 0:
+        parts.append("Эмодзи не используй.")
+    else:
+        # TODO: Возможно стоит подправить
+        #parts.append(f"Эмодзи — не более {prefs['emojis_max']} и только в начале первой строки, если уместно.")
+        parts.append(f"Эмодзи — не более {prefs['emojis_max']} если уместно.")
+    # HTML
+    parts.append(
+        "Формат вывода: HTML для Telegram. Разрешено: <b>/<strong>, <i>/<em>, <u>/<ins>, <s>/<strike>/<del>, "
+        "<a href=...>, <code>, <pre>, <blockquote>, <tg-spoiler> или <span class=\"tg-spoiler\">…</span>. "
+        "Кастомные эмодзи <tg-emoji> не используй без явной необходимости."
+    )
+    parts.append("Запрещено: <p>, <br>, списочные теги, произвольные атрибуты (кроме href у <a>). Абзацы разделяй пустой строкой.")
+    # Верстка
+    parts.append("Для маркированных пунктов используй обычные строки, без специальных тегов.")
+    # Возвращаем часть запроса с описанием стиля
+    return " ".join(parts)
 
 
 def _build_prompt_mode_a(anchor: Dict, others: List[Dict]) -> Tuple[str, str]:
+    """
+    Строит промпт для режима A: перефразирование якорного поста + добавление деталей из других источников.
+    
+    Режим A подходит когда:
+    - Есть один основной пост с хорошей информацией
+    - Другие посты содержат дополнительные детали
+    - Нужно сохранить структуру основного поста
+    
+    Args:
+        anchor: Якорный (основной) пост
+        others: Список дополнительных постов с деталями
+        
+    Returns:
+        Tuple[str, str]: (системный промпт, пользовательский промпт)
+    """
     system = (
         "Ты — нейтральный редактор новостей. Пиши фактически, без эмоций и оценочных суждений. "
         "Используй только предоставленные тексты постов. Не выдумывай фактов. Если данные расходятся, укажи это. "
-        "Формат вывода: HTML, совместимый с Telegram parse_mode=HTML. Используй только теги <b>, <i>, <u>. "
-        "Ссылки <a> не используй. Эмодзи — не более одного, только в заголовке, если уместно."
+        + _compose_style_instructions()
     )
     anchor_block = (
         f"Якорный пост (channel={anchor.get('channel_tg_id')}, post_id={anchor.get('post_id')}):\n"
         f"" + (anchor.get('content') or "").strip()
     )
     other_blocks = []
-    for p in others:
-        other_blocks.append(
-            f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
-        )
+    # for p in others:
+    #     other_blocks.append(
+    #         f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
+    #     )
+    # Определяем желаемый диапазон абзацев (по среднему размеру, разбросу и новизне)
+    posts_for_metrics = [{**anchor}] + others
+    avg_len, var_len, _ = _compute_avg_var_len(posts_for_metrics)
+    novelty = _compute_novelty_score(posts_for_metrics)
+    prefs = _get_style_prefs()
+    min_p, max_p = _compute_target_paragraphs_from_metrics(avg_len, var_len, novelty, prefs['style'], prefs['tone'])
+    len_hint = f"Сделай {min_p}–{max_p} абзацев." if min_p != max_p else f"Сделай {min_p} абзац(а)."
+
     user = (
         "Перепиши якорный пост нейтрально и добавь проверенные детали из других постов.\n"
-        "Структура: короткий лид (кто/что/где/когда), затем детали, цитаты и контекст.\n"
-        "Запрещено: новые факты, эмоциональная лексика. Чётко отмечай спорные моменты.\n"
-        "Выводи HTML без обёрток кода. Заголовок сделай жирным (<b>..</b>). Пункты деталей — как список с переносами строк.\n\n"
+        "Сделай первый ключевой факт выразительным (можно выделить <b>жирным</b>), затем плавно раскрой детали.\n"
+        "Цитаты допустимо выделять <i>курсивом</i>. Не добавляй новых фактов.\n"
+        f"{len_hint}\n\n"
         + anchor_block
         + "\n\nДополнительные источники:\n"
         + "\n\n".join(other_blocks)
-        + "\n\nВыведи только HTML-текст новости (3–6 абзацев) и затем строку 'Источники:' (без ссылок) со списком (channel, post_id)."
+        + "\n\nВыведи только HTML-текст и затем 'Источники:' (без ссылок) со списком (channel, post_id)."
     )
     return system, user
 
 
 def _build_prompt_mode_b(posts: List[Dict]) -> Tuple[str, str]:
+    """
+    Строит промпт для режима B: синтез новой статьи с нуля на основе всех источников.
+    
+    Режим B подходит когда:
+    - Все посты содержат равнозначную информацию
+    - Нужно создать принципиально новую структуру
+    - Посты дополняют друг друга фактами
+    
+    Args:
+        posts: Список всех постов кластера
+        
+    Returns:
+        Tuple[str, str]: (системный промпт, пользовательский промпт)
+    """
     system = (
-        "Ты — нейтральный редактор новостей. Пиши фактически, без эмоций, только по источникам. "
-        "Формат вывода: HTML, совместимый с Telegram parse_mode=HTML. Допустимые теги: <b>, <i>, <u>. "
-        "Не используй <a>. Эмодзи — максимум три"
+        "Ты — редактор постов различного характера."
+        + _compose_style_instructions()
     )
     blocks = []
-    for p in posts:
-        blocks.append(
-            f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
-        )
+    # for p in posts:
+    #     blocks.append(
+    #         f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
+    #     )
+    avg_len, var_len, _ = _compute_avg_var_len(posts)
+    novelty = _compute_novelty_score(posts)
+    prefs = _get_style_prefs()
+    min_p, max_p = _compute_target_paragraphs_from_metrics(avg_len, var_len, novelty, prefs['style'], prefs['tone'])
+    lp = _get_length_prefs()
+    if lp['allow_headline_only'] and min_p == 1:
+        headline_hint = "Разрешено: жирный лид и один короткий абзац. "
+    else:
+        headline_hint = ""
+    len_hint = f"Сделай {min_p}–{max_p} абзацев." if min_p != max_p else f"Сделай {min_p} абзац(а)."
+
     user = (
-        "Синтезируй новость с нуля по всем источникам.\n"
-        "Строго следуй структуре и объёму, не вставляй исходные тексты целиком.\n"
-        "Структура:\n"
-        "1) <b>Лид</b> (1–2 предложения: кто/что/где/когда).\n"
-        "2) Детали (1–2 абзаца, только подтверждённые факты, используй переносы строк для разделения пунктов).\n"
-        "3) Цитаты/реакции (если есть), выдели <i>курсивом</i>.\n"
-        "4) 'Что известно/что не подтверждено'.\n"
-        "Требования: не копируй фразы из источников, переформулируй. Не добавляй фактов, которых нет в источниках.\n"
-        "Если есть противоречия — опиши нейтрально. Вывод строго в HTML, без Markdown и без кода.\n\n"
+        "Синтезируй цельный текст заметки.\n"
+        f"Первый ключевой факт можно выделить <b>жирным</b>. Детали раскрой плавно, цитаты — <i>курсивом</i>. {headline_hint}{len_hint}\n"
+        "Требования: не добавляй фактов, которых нет в источниках.\n"
+        "Если есть противоречия — укажи их нейтрально. Вывод строго в HTML, без Markdown и без кода.\n\n"
         + "\n\n".join(blocks)
-        + "\n\nВыведи только HTML-текст (3–6 абзацев) и затем 'Источники:' (без ссылок) со списком (channel, post_id)."
+        + "\n\nВыведи только HTML-текст и затем 'Источники:' (без ссылок) со списком (channel, post_id)."
     )
     return system, user
 
 
+def _get_model_candidates(preferred: str | None) -> List[str]:
+    """
+    Формирует список кандидатов моделей для LLM с fallback механизмом.
+    
+    Приоритет:
+    1. Предпочитаемая модель (если указана)
+    2. Модель из OPENAI_MODEL
+    3. Бесплатные модели OpenRouter
+    4. Платные модели OpenRouter
+    
+    Args:
+        preferred: Предпочитаемая модель (может быть None)
+        
+    Returns:
+        List[str]: Список моделей в порядке приоритета
+    """
+    raw = os.getenv("OPENAI_MODEL_CANDIDATES")
+    if raw:
+        models = [m.strip() for m in raw.split(",") if m.strip()]
+        if models:
+            return models
+    # Sane defaults for OpenRouter
+    defaults = [
+        preferred or os.getenv("OPENAI_MODEL", ""),
+        "deepseek/deepseek-chat-v3-0324:free",
+        "meta-llama/llama-3.1-8b-instruct",
+        "qwen/qwen-2.5-14b-instruct",
+    ]
+    # Deduplicate while preserving order and removing empties
+    seen = set()
+    result = []
+    for m in defaults:
+        if not m:
+            continue
+        if m not in seen:
+            seen.add(m)
+            result.append(m)
+    return result
+
+
+def _is_ratelimit_error(err: Exception) -> bool:
+    """
+    Проверяет, является ли ошибка связанной с превышением лимитов запросов.
+    
+    Args:
+        err: Исключение для проверки
+        
+    Returns:
+        bool: True если это ошибка rate limit
+    """
+    msg = str(err).lower()
+    return ("429" in msg) or ("rate-limit" in msg) or ("temporarily rate-limited" in msg) or ("insufficient_quota" in msg)
+
+
 def _llm_generate(system: str, user: str, model: str | None = None, max_output_tokens: int = 700) -> Tuple[str | None, str | None]:
+    """
+    Выполняет запрос к LLM API с поддержкой fallback механизмов.
+    
+    Особенности:
+    - Поддержка OpenAI v1 и legacy API
+    - Автоматический fallback между моделями при rate limit
+    - Экспоненциальная задержка при повторных попытках
+    - Поддержка OpenRouter с кастомными заголовками
+    
+    Args:
+        system: Системный промпт
+        user: Пользовательский промпт
+        model: Предпочитаемая модель (опционально)
+        max_output_tokens: Максимальное количество токенов в ответе
+        
+    Returns:
+        Tuple[str | None, str | None]: (текст ответа, название использованной модели)
+    """
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or OpenAI is None:
         logger.warning("[SYNTH] OpenAI API key missing or SDK not available — using fallback")
         return None, None
     try:
-        # Попытка v1-клиента
-        try:
-            base_url = os.getenv("OPENAI_BASE_URL")
-            default_headers = None
-            # Специфика OpenRouter: рекомендуемые заголовки
-            if base_url and "openrouter.ai" in base_url:
-                headers = {}
-                ref = os.getenv("OPENROUTER_REFERER")
-                title = os.getenv("OPENROUTER_TITLE")
-                if ref:
-                    headers["HTTP-Referer"] = ref
-                if title:
-                    headers["X-Title"] = title
-                default_headers = headers if headers else None
-            if base_url:
-                client = OpenAI(base_url=base_url, default_headers=default_headers)
-            else:
-                client = OpenAI(default_headers=default_headers)  # ключ берётся из OPENAI_API_KEY
-            # Подбор дефолтной модели под OpenRouter, если не указано явно
-            if (not model) and (not os.getenv("OPENAI_MODEL")) and base_url and "openrouter.ai" in base_url:
-                used_model = "meta-llama/llama-3.1-8b-instruct"
-            else:
-                used_model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-            resp = client.chat.completions.create(
-                model=used_model,
-                temperature=0.2,
-                max_tokens=max_output_tokens,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            return (resp.choices[0].message.content or "").strip(), used_model
-        except TypeError as e:
-            # На некоторых версиях SDK падает из-за несовместимого параметра 'proxies' — фолбэк на legacy API
-            logger.warning(f"[SYNTH] OpenAI v1 client init failed ({e}); falling back to legacy API")
-            import openai as openai_legacy  # type: ignore
-            openai_legacy.api_key = api_key
-            base_url = os.getenv("OPENAI_BASE_URL")
-            if base_url:
-                openai_legacy.api_base = base_url
-            # Дефолт под OpenRouter
-            if (not model) and (not os.getenv("OPENAI_MODEL")) and base_url and "openrouter.ai" in base_url:
-                used_model = "meta-llama/llama-3.1-8b-instruct"
-            else:
-                used_model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-            resp = openai_legacy.ChatCompletion.create(
-                model=used_model,
-                temperature=0.2,
-                max_tokens=max_output_tokens,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            content = resp["choices"][0]["message"]["content"]
-            return (content or "").strip(), used_model
+        base_url = os.getenv("OPENAI_BASE_URL")
+        default_headers = None
+        if base_url and "openrouter.ai" in base_url:
+            headers = {}
+            ref = os.getenv("OPENROUTER_REFERER")
+            title = os.getenv("OPENROUTER_TITLE")
+            if ref:
+                headers["HTTP-Referer"] = ref
+            if title:
+                headers["X-Title"] = title
+            default_headers = headers if headers else None
+
+        # Подготовим клиента v1
+        client = OpenAI(base_url=base_url, default_headers=default_headers) if base_url else OpenAI(default_headers=default_headers)
+
+        candidates = _get_model_candidates(model)
+        backoff_s = 1.0
+        for idx, used_model in enumerate(candidates):
+            try:
+                logger.info(f"[SYNTH] LLM try {idx+1}/{len(candidates)} model={used_model}")
+                resp = client.chat.completions.create(
+                    model=used_model,
+                    temperature=0.2,
+                    max_tokens=max_output_tokens,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                )
+                return (resp.choices[0].message.content or "").strip(), used_model
+            except Exception as e1:
+                if _is_ratelimit_error(e1) and (idx + 1) < len(candidates):
+                    logger.warning(f"[SYNTH] Rate-limited on model={used_model}, will try next after {backoff_s:.1f}s")
+                    time.sleep(backoff_s)
+                    backoff_s = min(backoff_s * 2.0, 6.0)
+                    continue
+                # Фолбэк к legacy клиенту для этой же модели
+                try:
+                    import openai as openai_legacy  # type: ignore
+                    openai_legacy.api_key = api_key
+                    if base_url:
+                        openai_legacy.api_base = base_url
+                    logger.info(f"[SYNTH] Legacy LLM try model={used_model}")
+                    resp = openai_legacy.ChatCompletion.create(
+                        model=used_model,
+                        temperature=0.2,
+                        max_tokens=max_output_tokens,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                    )
+                    content = resp["choices"][0]["message"]["content"]
+                    return (content or "").strip(), used_model
+                except Exception as e2:
+                    if _is_ratelimit_error(e2) and (idx + 1) < len(candidates):
+                        logger.warning(f"[SYNTH] Rate-limited (legacy) on model={used_model}, will try next after {backoff_s:.1f}s")
+                        time.sleep(backoff_s)
+                        backoff_s = min(backoff_s * 2.0, 6.0)
+                        continue
+                    logger.error(f"[SYNTH] Model {used_model} failed: {e2}")
+                    # Если это последняя — прорвёмся наружу к общему except
+                    if (idx + 1) == len(candidates):
+                        raise e2
+                    # Иначе пробуем следующую без задержки
+                    continue
     except Exception as e:  # pragma: no cover
         logger.error(f"[SYNTH] OpenAI call failed: {e}", exc_info=True)
         return None, None
 
 
-def _split_sentences_ru(text: str) -> List[str]:
+def _split_sentences(text: str) -> List[str]:
+    """
+    Разбивает текст на предложения по знакам препинания.
+    
+    Args:
+        text: Исходный текст
+        
+    Returns:
+        List[str]: Список предложений
+    """
     if not text:
         return []
     # Простая эвристика: разбиваем по . ! ? с возможными пробелами и кавычками
-    parts = re.split(r"(?<=[\.!?])\s+", text.strip())
+    parts = re.split(r"(?<=[\.!?;])\s+", text.strip())
     return [p.strip() for p in parts if p and len(p.strip()) > 0]
 
 
-def _extract_lead(text: str, max_sentences: int = 2, max_chars: int = 400) -> str:
-    sents = _split_sentences_ru(text)
-    lead = " ".join(sents[:max_sentences]).strip()
-    return _truncate_text(lead, max_chars)
-
-
-def _fallback_generate_mode_a(anchor: Dict, others: List[Dict]) -> str:
-    # Фолбэк без LLM: краткий лид из якоря + лаконичные детали из других источников + список источников
-    anchor_text = (anchor.get('content') or '').strip()
-    lead = _extract_lead(anchor_text, max_sentences=2, max_chars=400)
-    details = []
-    used_sources = [(anchor.get('channel_tg_id'), anchor.get('post_id'))]
-    for p in others:
-        txt = (p.get('content') or '').strip()
-        if not txt:
-            continue
-        bullet = _extract_lead(txt, max_sentences=1, max_chars=160)
-        if bullet:
-            details.append(f"- {bullet}")
-            used_sources.append((p.get('channel_tg_id'), p.get('post_id')))
-        if len(details) >= 6:
-            break
-    parts = []
-    if lead:
-        parts.append(lead)
-    if details:
-        parts.append("Детали:")
-        parts.append("\n".join(details))
-    parts.append("Источники: " + ", ".join([f"({cid}, {pid})" for cid, pid in used_sources]))
-    return "\n\n".join(parts)
-
-
-def _fallback_generate_mode_b(posts: List[Dict]) -> str:
-    # Фолбэк без LLM: лид из лучшего поста + краткие пункты из остальных + источники
-    if not posts:
-        return ""
-    main = _select_anchor_post(posts)
-    lead = _extract_lead((main.get('content') or ''), max_sentences=2, max_chars=400)
-    details = []
-    used_ids = set([(main.get('channel_tg_id'), main.get('post_id'))])
-    for p in posts:
-        if p.get('post_id') == main.get('post_id'):
-            continue
-        txt = (p.get('content') or '').strip()
-        if not txt:
-            continue
-        bullet = _extract_lead(txt, max_sentences=1, max_chars=160)
-        if bullet:
-            details.append(f"- {bullet}")
-            used_ids.add((p.get('channel_tg_id'), p.get('post_id')))
-        if len(details) >= 8:
-            break
-    parts = []
-    if lead:
-        parts.append(lead)
-    if details:
-        parts.append("Детали:")
-        parts.append("\n".join(details))
-    parts.append("Источники: " + ", ".join([f"({cid}, {pid})" for cid, pid in used_ids]))
-    return "\n\n".join(parts)
+def _extract_lead(text: str, max_sentences: int = 2) -> str:
+    """
+    Извлекает лид (краткое введение) из текста.
+    
+    Args:
+        text: Исходный текст
+        max_sentences: Максимальное количество предложений в лиде
+        
+    Returns:
+        str: Извлеченный лид
+    """
+    sents = _split_sentences(text)
+    return " ".join(sents[:max_sentences]).strip()
 
 
 def synthesize_news(cluster_posts: List[Dict], mode: str = 'A') -> Tuple[str, Dict]:
     """
-    Генерация итогового текста по кластеру.
+    Основная функция генерации новостной статьи из кластера постов.
 
-    :param cluster_posts: список постов кластера (post_id, channel_tg_id, content, views, reactions, comments, forwards)
-    :param mode: 'A' — перефразирование якоря + детали; 'B' — синтез с нуля по всем источникам
-    :return: (text, meta)
+    Поддерживает два режима:
+    - Mode A: Перефразирование якорного поста + добавление деталей
+    - Mode B: Синтез новой статьи с нуля на основе всех источников
+
+    Args:
+        cluster_posts: Список постов кластера с полями:
+                      post_id, channel_tg_id, content, views, reactions, comments, forwards
+        mode: Режим генерации ('A' или 'B')
+
+    Returns:
+        Tuple[str, Dict]: (сгенерированный текст, метаданные)
+                         Метаданные содержат: mode, posts, model, prompt_len
     """
-    meta: Dict = {"mode": mode, "posts": len(cluster_posts or [])}
+    # Валидация входных данных
     if not cluster_posts:
-        return "", meta
-
+        logger.warning("[SYNTH] Empty cluster_posts")
+        return "", {"mode": mode, "posts": 0, "model": "none", "prompt_len": 0}
+    
+    # Валидация режима
+    if mode.upper() not in ['A', 'B']:
+        logger.error(f"[SYNTH] Invalid mode '{mode}', using 'A' as default")
+        mode = 'A'
+    
     # Нормализуем и отсортируем по важности (views/reactions)
     posts = list(cluster_posts)
     posts.sort(key=lambda p: (p.get('views', 0), p.get('reactions', 0), len((p.get('content') or ''))), reverse=True)
-
-    # Подрежем вход до разумного размера для промпта
+    # Ограничиваем количество постов для обработки (разумный лимит для LLM)
     max_posts = 10
     posts = posts[:max_posts]
 
+    # Генерация в зависимости от режима
     if mode.upper() == 'A':
         anchor = _select_anchor_post(posts)
         others = [p for p in posts if p.get('post_id') != anchor.get('post_id')]
-        # Подрежем тексты
-        anchor['content'] = _truncate_text(anchor.get('content') or '', 2000)
-        for p in others:
-            p['content'] = _truncate_text(p.get('content') or '', 800)
         system, user = _build_prompt_mode_a(anchor, others)
-        # Кэш по (cluster_id отсутствует здесь) — кэшируем на уровне вызова synthesize_news
-        text, model_used = _llm_generate(system, user)
-        if not text:
-            text = _fallback_generate_mode_a(anchor, others)
-        meta["model"] = model_used or "fallback"
-        meta["prompt_len"] = len(user)
-        return text, meta
+    else:
+        system, user = _build_prompt_mode_b(posts)
 
-    # Mode B
-    for p in posts:
-        p['content'] = _truncate_text(p.get('content') or '', 1200)
-    system, user = _build_prompt_mode_b(posts)
+    # Генерация текста через LLM
     text, model_used = _llm_generate(system, user)
     if not text:
-        text = _fallback_generate_mode_b(posts)
-    meta["model"] = model_used or "fallback"
-    meta["prompt_len"] = len(user)
-    return text, meta
+        # Фолбэк без LLM
+        logger.warning("[SYNTH] LLM generation failed, using fallback")
+        # TODO: Нужно реализовать метод, чтобы при подобных ошибках администраторы оперативно получали информацию об этом
 
-
-def _prompt_hash(system: str, user: str) -> str:
-    s = f"v1|{system}\n\n{user}".encode('utf-8', errors='ignore')
-    return hashlib.sha256(s).hexdigest()
-
-
-def synthesize_news_with_cache(cluster_id: int, cluster_posts: List[Dict], mode: str = 'A') -> Tuple[str, Dict]:
-    """
-    Обёртка над synthesize_news с кэшированием результата в БД по (cluster_id, mode, prompt_hash).
-    """
-    # Подготовка текста промпта для хэширования
-    preview_posts = list(cluster_posts)
-    preview_posts.sort(key=lambda p: (p.get('views', 0), p.get('reactions', 0), len((p.get('content') or ''))), reverse=True)
-    preview_posts = preview_posts[:10]
-
-    if mode.upper() == 'A':
-        anchor = _select_anchor_post(preview_posts)
-        others = [p for p in preview_posts if p.get('post_id') != anchor.get('post_id')]
-        anchor_text = _truncate_text(anchor.get('content') or '', 2000)
-        other_text = "\n".join(_truncate_text(p.get('content') or '', 800) for p in others)
-        sys_preview, user_preview = _build_prompt_mode_a(
-            {**anchor, 'content': anchor_text},
-            [{**p, 'content': _truncate_text(p.get('content') or '', 800)} for p in others]
-        )
-    else:
-        sys_preview, user_preview = _build_prompt_mode_b([
-            {**p, 'content': _truncate_text(p.get('content') or '', 600)} for p in preview_posts
-        ])
-
-    phash = _prompt_hash(sys_preview, user_preview)
-
-    # Чтение из кэша
-    cached = get_cached_generated_article(cluster_id, mode.upper(), phash)
-    if cached and (cached.get('text') or '').strip():
-        logger.info(f"[SYNTH][CACHE] hit cluster={cluster_id} mode={mode} hash={phash[:8]}... id={cached.get('id')}")
-        return cached['text'], {"mode": mode, "posts": len(cluster_posts or []), "cached": True, "cache_id": cached.get('id'), "model": cached.get('model_name'), "prompt_len": len(user_preview)}
-
-    # Генерация (внутри повторим логику synthesize_news, чтобы иметь доступ к system/user)
-    if mode.upper() == 'A':
-        anchor = _select_anchor_post(preview_posts)
-        others = [p for p in preview_posts if p.get('post_id') != anchor.get('post_id')]
-        system, user = _build_prompt_mode_a(
-            {**anchor, 'content': _truncate_text(anchor.get('content') or '', 2000)},
-            [{**p, 'content': _truncate_text(p.get('content') or '', 800)} for p in others]
-        )
-    else:
-        system, user = _build_prompt_mode_b([
-            {**p, 'content': _truncate_text(p.get('content') or '', 600)} for p in preview_posts
-        ])
-
-    text, model_used = _llm_generate(system, user)
-    if not text:
-        # Фолбэк без кэширования модели
-        if mode.upper() == 'A':
-            text = _fallback_generate_mode_a(_select_anchor_post(preview_posts), [p for p in preview_posts if p.get('post_id') != _select_anchor_post(preview_posts).get('post_id')])
-        else:
-            text = _fallback_generate_mode_b(preview_posts)
-        text = _normalize_output(text)
-        return text, {"mode": mode, "posts": len(cluster_posts or []), "cached": False, "model": "fallback", "prompt_len": len(user)}
-
-    # Запись в кэш
-    try:
-        normalized = _normalize_output(text)
-        cache_id = put_cached_generated_article(
-            cluster_id=cluster_id,
-            mode=mode.upper(),
-            prompt_hash=phash,
-            text=normalized,
-            model_name=model_used,
-            facts_json=None,
-        )
-        logger.info(f"[SYNTH][CACHE] put cluster={cluster_id} mode={mode} hash={phash[:8]}... id={cache_id}")
-    except Exception as e:
-        logger.warning(f"[SYNTH][CACHE] put failed: {e}")
-
-    return normalized, {"mode": mode, "posts": len(cluster_posts or []), "cached": False, "model": model_used, "prompt_len": len(user)}
+    # Нормализация выхода
+    normalized = _normalize_output(text)
+    return normalized, {"mode": mode, "posts": len(cluster_posts), "model": model_used, "prompt_len": len(user)}
 
 
 def _normalize_output(text: str) -> str:
     """
-    Пост-обработка вывода: удаляем построчные вставки вида "Источник ..." внутри тела,
-    схлопываем пустые строки, оставляем (или добавляем) секцию Источники в конце как есть.
+    Пост-обработка вывода LLM для совместимости с Telegram HTML.
+    
+    Выполняет:
+    1. Удаление внутренних ссылок на источники
+    2. Удаление markdown разметки
+    3. Схлопывание лишних пустых строк
+    4. Автоматическое выделение первой строки жирным
+    5. Фильтрацию HTML тегов (только разрешенные для Telegram)
+    6. Нормализацию синонимичных тегов (strong->b, em->i)
+    7. Сохранение блока источников в конце
+    
+    Args:
+        text: Исходный текст от LLM
+        
+    Returns:
+        str: Нормализованный HTML текст для Telegram
     """
     if not text:
         return text
@@ -392,8 +670,10 @@ def _normalize_output(text: str) -> str:
             # часть списка источников — сохраняем как есть
             sources_block.append(l)
             continue
-        # удаляем строки начинающиеся на "Источник " или markdown-маркеры
+        # удаляем строки начинающиеся на "Источник ", markdown-маркеры и явные заголовки
         if re.match(r'^\s*источник\b', low, flags=re.IGNORECASE):
+            continue
+        if re.match(r'^\s*(лид|детали|что известно/что не подтверждено)\s*:?', low, flags=re.IGNORECASE):
             continue
         if low.startswith('- ') or low.startswith('* '):
             # заменим markdown-список на простой текст с переносом строки
@@ -414,7 +694,39 @@ def _normalize_output(text: str) -> str:
     while cleaned and not cleaned[-1].strip():
         cleaned.pop()
 
+    # Автоматически подчёркиваем первую строку (если нет HTML-тегов и она короткая)
+    if cleaned:
+        first = cleaned[0]
+        if ('<' not in first and '>' not in first) and 5 <= len(first) <= 140:
+            cleaned[0] = f"<b>{first}</b>"
+
     body = "\n".join(cleaned).strip()
+
+    # Жёсткая фильтрация HTML: всегда extended whitelist
+    def _strict_filter(html: str) -> str:
+        # normalize synonyms
+        html = re.sub(r"</?strong>", lambda m: "</b>" if m.group(0).startswith("</") else "<b>", html, flags=re.IGNORECASE)
+        html = re.sub(r"</?em>",     lambda m: "</i>" if m.group(0).startswith("</") else "<i>", html, flags=re.IGNORECASE)
+        html = re.sub(r"</?ins>",    lambda m: "</u>" if m.group(0).startswith("</") else "<u>", html, flags=re.IGNORECASE)
+        html = re.sub(r"</?(strike|del)>", lambda m: "</s>" if m.group(0).startswith("</") else "<s>", html, flags=re.IGNORECASE)
+        # always remove <p> and <br>
+        html = re.sub(r"<\s*/?\s*p\s*>", "", html, flags=re.IGNORECASE)
+        html = re.sub(r"<\s*/?\s*br\s*/?>", "", html, flags=re.IGNORECASE)
+        # allow b,i,u,s,a,code,pre,blockquote,tg-spoiler/span.tg-spoiler
+        # Strip attributes except href on <a>
+        # 1) sanitize <a>: keep only href
+        html = re.sub(r"<a\s+[^>]*href=\"([^\"]+)\"[^>]*>", r"<a href=\"\1\">", html, flags=re.IGNORECASE)
+        # 2) keep closing tags
+        html = re.sub(r"</\s*(b|i|u|s|code|pre|blockquote|a|tg-spoiler)\s*>", r"</\1>", html, flags=re.IGNORECASE)
+        # 3) keep opening tags (no attrs), special-case span.tg-spoiler -> <tg-spoiler>
+        html = re.sub(r"<\s*span\s+class=\"tg-spoiler\"\s*>", "<tg-spoiler>", html, flags=re.IGNORECASE)
+        html = re.sub(r"<\s*(b|i|u|s|code|pre|blockquote|a|tg-spoiler)\s*>", r"<\1>", html, flags=re.IGNORECASE)
+        # finally remove any other tag
+        html = re.sub(r"<\s*(?!/?(?:b|i|u|s|code|pre|blockquote|a|tg-spoiler)\b)[^>]*>", "", html, flags=re.IGNORECASE)
+        return html
+
+    body = _strict_filter(body)
+
     tail = "\n".join(sources_block).strip()
     if tail:
         return (body + "\n\n" + tail).strip()
