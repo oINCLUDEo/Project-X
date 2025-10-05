@@ -210,6 +210,7 @@ def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, nove
     2. Добавляет бонусы за высокую дисперсию длин и новизну фактов
     3. Применяет ограничения стиля (entertainment = короче)
     4. Учитывает системные параметры min/max абзацев
+    5. Ограничивает общую длину текста лимитами Telegram
     
     Args:
         avg_len: Средняя длина постов в символах
@@ -222,6 +223,11 @@ def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, nove
         Tuple[int, int]: (минимальное количество абзацев, максимальное количество абзацев)
     """
     lp = _get_length_prefs()
+    
+    # Telegram лимиты
+    TELEGRAM_CAPTION_LIMIT = 1024  # Лимит подписи для медиа
+    TELEGRAM_MESSAGE_LIMIT = 4096  # Лимит обычного сообщения
+    
     # База по среднему размеру
     if lp['mode'] == 'short':
         base_min, base_max = max(1, lp['min_p']), max(1, min(2, lp['max_p']))
@@ -234,20 +240,33 @@ def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, nove
             base_min, base_max = max(2, lp['min_p']), max(3, lp['max_p'])
         else:
             base_min, base_max = max(3, lp['min_p']), max(5, lp['max_p'])
+    
     # Усилители: разброс и новизна
     bump = 0
     if var_len > 80000:  # ~разброс длин высок
         bump += 1
     if novelty > 0.3:    # достаточно новых фрагментов
         bump += 1
-    # TODO: Странный момент разобрать надо
+    
     min_p = min(lp['max_p'], base_min + bump)
     max_p = min(lp['max_p'], base_max + bump)
+    
     # Стильные ограничения
     if style == 'entertainment':
         max_p = max(min_p, min(max_p, 3))
+    
+    # Ограничения по длине для Telegram
+    # Предполагаем ~200-300 символов на абзац для ограничения общей длины
+    estimated_chars_per_paragraph = 250
+    max_paragraphs_by_caption = TELEGRAM_CAPTION_LIMIT // estimated_chars_per_paragraph
+    max_paragraphs_by_message = TELEGRAM_MESSAGE_LIMIT // estimated_chars_per_paragraph
+    
+    # Ограничиваем максимальное количество абзацев лимитами Telegram
+    max_p = min(max_p, max_paragraphs_by_caption)
+    
     if min_p > max_p:
         min_p = max_p
+    
     return min_p, max_p
 
 
@@ -303,7 +322,7 @@ def _compose_style_instructions() -> str:
     return " ".join(parts)
 
 
-def _build_prompt_mode_a(anchor: Dict, others: List[Dict]) -> Tuple[str, str]:
+def _build_prompt_mode_a(anchor: Dict, others: List[Dict], has_media: bool = False) -> Tuple[str, str]:
     """
     Строит промпт для режима A: перефразирование якорного поста + добавление деталей из других источников.
     
@@ -315,13 +334,19 @@ def _build_prompt_mode_a(anchor: Dict, others: List[Dict]) -> Tuple[str, str]:
     Args:
         anchor: Якорный (основной) пост
         others: Список дополнительных постов с деталями
+        has_media: Есть ли медиа в кластере (влияет на лимит длины)
         
     Returns:
         Tuple[str, str]: (системный промпт, пользовательский промпт)
     """
+    # Определяем лимит в зависимости от наличия медиа
+    char_limit = 1024 if has_media else 4096
+    limit_text = f"{char_limit} символов" if has_media else f"{char_limit} символов"
+    
     system = (
         "Ты — нейтральный редактор новостей. Пиши фактически, без эмоций и оценочных суждений. "
         "Используй только предоставленные тексты постов. Не выдумывай фактов. Если данные расходятся, укажи это. "
+        f"ВАЖНО: Длина итогового текста не должна превышать {limit_text} для корректной отправки в Telegram. "
         + _compose_style_instructions()
     )
     anchor_block = (
@@ -354,7 +379,7 @@ def _build_prompt_mode_a(anchor: Dict, others: List[Dict]) -> Tuple[str, str]:
     return system, user
 
 
-def _build_prompt_mode_b(posts: List[Dict]) -> Tuple[str, str]:
+def _build_prompt_mode_b(posts: List[Dict], has_media: bool = False) -> Tuple[str, str]:
     """
     Строит промпт для режима B: синтез новой статьи с нуля на основе всех источников.
     
@@ -365,12 +390,18 @@ def _build_prompt_mode_b(posts: List[Dict]) -> Tuple[str, str]:
     
     Args:
         posts: Список всех постов кластера
+        has_media: Есть ли медиа в кластере (влияет на лимит длины)
         
     Returns:
         Tuple[str, str]: (системный промпт, пользовательский промпт)
     """
+    # Определяем лимит в зависимости от наличия медиа
+    char_limit = 1024 if has_media else 4096
+    limit_text = f"{char_limit} символов"
+    
     system = (
-        "Ты — редактор постов различного характера."
+        "Ты — редактор постов различного характера. "
+        f"ВАЖНО: Длина итогового текста не должна превышать {limit_text} для корректной отправки в Telegram. "
         + _compose_style_instructions()
     )
     blocks = []
@@ -581,7 +612,7 @@ def _extract_lead(text: str, max_sentences: int = 2) -> str:
     return " ".join(sents[:max_sentences]).strip()
 
 
-def synthesize_news(cluster_posts: List[Dict], mode: str = 'A') -> Tuple[str, Dict]:
+def synthesize_news(cluster_posts: List[Dict], mode: str = 'A', has_media: bool = False) -> Tuple[str, Dict]:
     """
     Основная функция генерации новостной статьи из кластера постов.
 
@@ -591,22 +622,33 @@ def synthesize_news(cluster_posts: List[Dict], mode: str = 'A') -> Tuple[str, Di
 
     Args:
         cluster_posts: Список постов кластера с полями:
-                      post_id, channel_tg_id, content, views, reactions, comments, forwards
+                      post_id, channel_tg_id, content, media_urls, views, reactions, comments, forwards
         mode: Режим генерации ('A' или 'B')
+        has_media: Есть ли медиа в кластере (влияет на лимит длины: 1024 для медиа, 4096 для текста)
 
     Returns:
         Tuple[str, Dict]: (сгенерированный текст, метаданные)
-                         Метаданные содержат: mode, posts, model, prompt_len
+                         Метаданные содержат: mode, posts, model, prompt_len, has_media
     """
     # Валидация входных данных
     if not cluster_posts:
         logger.warning("[SYNTH] Empty cluster_posts")
-        return "", {"mode": mode, "posts": 0, "model": "none", "prompt_len": 0}
+        return "", {"mode": mode, "posts": 0, "model": "none", "prompt_len": 0, "has_media": has_media}
     
     # Валидация режима
     if mode.upper() not in ['A', 'B']:
         logger.error(f"[SYNTH] Invalid mode '{mode}', using 'A' as default")
         mode = 'A'
+    
+    # Определяем наличие медиа в кластере, если не передано явно
+    if not has_media:
+        has_media = any(
+            post.get('media_urls') and 
+            post.get('media_urls') != [] and 
+            post.get('media_urls') != [None] and
+            post.get('media_urls') != ['']
+            for post in cluster_posts
+        )
     
     # Нормализуем и отсортируем по важности (views/reactions)
     posts = list(cluster_posts)
@@ -619,9 +661,9 @@ def synthesize_news(cluster_posts: List[Dict], mode: str = 'A') -> Tuple[str, Di
     if mode.upper() == 'A':
         anchor = _select_anchor_post(posts)
         others = [p for p in posts if p.get('post_id') != anchor.get('post_id')]
-        system, user = _build_prompt_mode_a(anchor, others)
+        system, user = _build_prompt_mode_a(anchor, others, has_media)
     else:
-        system, user = _build_prompt_mode_b(posts)
+        system, user = _build_prompt_mode_b(posts, has_media)
 
     # Генерация текста через LLM
     text, model_used = _llm_generate(system, user)
@@ -631,11 +673,11 @@ def synthesize_news(cluster_posts: List[Dict], mode: str = 'A') -> Tuple[str, Di
         # TODO: Нужно реализовать метод, чтобы при подобных ошибках администраторы оперативно получали информацию об этом
 
     # Нормализация выхода
-    normalized = _normalize_output(text)
-    return normalized, {"mode": mode, "posts": len(cluster_posts), "model": model_used, "prompt_len": len(user)}
+    normalized = _normalize_output(text, has_media)
+    return normalized, {"mode": mode, "posts": len(cluster_posts), "model": model_used, "prompt_len": len(user), "has_media": has_media}
 
 
-def _normalize_output(text: str) -> str:
+def _normalize_output(text: str, has_media: bool = False) -> str:
     """
     Пост-обработка вывода LLM для совместимости с Telegram HTML.
     
@@ -647,6 +689,7 @@ def _normalize_output(text: str) -> str:
     5. Фильтрацию HTML тегов (только разрешенные для Telegram)
     6. Нормализацию синонимичных тегов (strong->b, em->i)
     7. Сохранение блока источников в конце
+    8. Обрезку текста до лимита Telegram (1024 символа)
     
     Args:
         text: Исходный текст от LLM
@@ -729,7 +772,21 @@ def _normalize_output(text: str) -> str:
 
     tail = "\n".join(sources_block).strip()
     if tail:
-        return (body + "\n\n" + tail).strip()
-    return body
+        full_text = (body + "\n\n" + tail).strip()
+    else:
+        full_text = body
+    
+    # Обрезка до лимита Telegram в зависимости от наличия медиа
+    char_limit = 1024 if has_media else 4096
+    if len(full_text) > char_limit:
+        # Обрезаем до лимита, стараясь не разрывать слова
+        truncated = full_text[:char_limit]
+        last_space = truncated.rfind(' ')
+        if last_space > char_limit * 0.8:  # Если нашли пробел в разумных пределах
+            truncated = truncated[:last_space]
+        full_text = truncated + "..."
+        logger.warning(f"[SYNTH] Text truncated to {len(full_text)} chars (limit: {char_limit}, has_media: {has_media})")
+    
+    return full_text
 
 

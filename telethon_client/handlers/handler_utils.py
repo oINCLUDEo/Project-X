@@ -2,6 +2,7 @@ import logging
 import time
 import asyncio
 import datetime
+import os
 from datetime import timezone
 from telethon import utils
 import html as _html
@@ -21,7 +22,7 @@ from helpers.ad_helper import compute_ad_score, process_post_for_ad_check
 from AI.Ai_Functions import predict_ad_probability, get_embedding
 from helpers.helpers import compute_cluster_score, get_users_for_post
 from AI.content_generator import generate_unique_content
-from AI.news_synthesizer import synthesize_news, synthesize_news_with_cache
+from AI.news_synthesizer import synthesize_news
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,8 @@ def _sanitize_caption(text: str) -> str:
     except Exception as e:
         logger.error(f"[SANITIZE] Error processing text: {e}", exc_info=True)
         return text
+
+
 async def publish_main_post(bot, users, post_row):
     """Публикует главный пост. Возвращает True если отправка успешна всем пользователям."""
     # Сначала санитизируем основной контент
@@ -135,10 +138,13 @@ async def publish_main_post(bot, users, post_row):
             logger.debug(f"[PUBLISH] Added native ad: '{safe_ad}'")
     except Exception as e:
         logger.warning(f"[PUBLISH] Failed to add native ad: {e}")
+
+    # TODO: Странный участок кода нужна проверка
     media_urls = post_row[3] or []
     if isinstance(media_urls, str):
         import ast
         media_urls = ast.literal_eval(media_urls)
+
     if len(media_urls) > 1:
         # Альбом: фото и видео
         media_group = MediaGroupBuilder(caption=content)
@@ -314,11 +320,18 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                         # Выбор режима синтеза: 'A' (anchor+details) | 'B' (facts->write)
                         mode = (get_system_param('content_generation_mode', 'A') or 'A').upper()
                         if mode in ('A', 'B'):
-                            logger.info(f"[CONTENT] Используем современный генератор")
-                            unique_text, meta = synthesize_news_with_cache(cluster_id, full_posts, mode=mode)
+                            logger.info(f"[CONTENT] Используем генератор")
+                            # Определяем наличие медиа в главном посте
+                            main_post_media_urls = main_post[3] or []
+                            if isinstance(main_post_media_urls, str):
+                                import ast
+                                main_post_media_urls = ast.literal_eval(main_post_media_urls)
+                            has_media = len(main_post_media_urls) > 0
+                            
+                            unique_text, meta = synthesize_news(full_posts, mode=mode, has_media=has_media)
                             try:
                                 logger.info(
-                                    f"[CONTENT] meta: cached={meta.get('cached')} model={meta.get('model')} prompt_len={meta.get('prompt_len')} posts={meta.get('posts')}"
+                                    f"[CONTENT] meta: model={meta.get('model')} prompt_len={meta.get('prompt_len')} posts={meta.get('posts')} has_media={meta.get('has_media')}"
                                 )
                             except Exception:
                                 pass
