@@ -354,10 +354,10 @@ def _build_prompt_mode_a(anchor: Dict, others: List[Dict], has_media: bool = Fal
         f"" + (anchor.get('content') or "").strip()
     )
     other_blocks = []
-    # for p in others:
-    #     other_blocks.append(
-    #         f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
-    #     )
+    for p in others:
+        other_blocks.append(
+            f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
+        )
     # Определяем желаемый диапазон абзацев (по среднему размеру, разбросу и новизне)
     posts_for_metrics = [{**anchor}] + others
     avg_len, var_len, _ = _compute_avg_var_len(posts_for_metrics)
@@ -405,10 +405,10 @@ def _build_prompt_mode_b(posts: List[Dict], has_media: bool = False) -> Tuple[st
         + _compose_style_instructions()
     )
     blocks = []
-    # for p in posts:
-    #     blocks.append(
-    #         f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
-    #     )
+    for p in posts:
+        blocks.append(
+            f"Источник (channel={p.get('channel_tg_id')}, post_id={p.get('post_id')}):\n" + (p.get('content') or "").strip()
+        )
     avg_len, var_len, _ = _compute_avg_var_len(posts)
     novelty = _compute_novelty_score(posts)
     prefs = _get_style_prefs()
@@ -426,7 +426,7 @@ def _build_prompt_mode_b(posts: List[Dict], has_media: bool = False) -> Tuple[st
         "Требования: не добавляй фактов, которых нет в источниках.\n"
         "Если есть противоречия — укажи их нейтрально. Вывод строго в HTML, без Markdown и без кода.\n\n"
         + "\n\n".join(blocks)
-        + "\n\nВыведи только HTML-текст и затем 'Источники:' (без ссылок) со списком (channel, post_id)."
+        + "\n\nВыведи только HTML-текст"
     )
     return system, user
 
@@ -455,10 +455,10 @@ def _get_model_candidates(preferred: str | None) -> List[str]:
     # Sane defaults for OpenRouter
     defaults = [
         preferred or os.getenv("OPENAI_MODEL", ""),
-        "deepseek/deepseek-chat-v3-0324:free",
         "meta-llama/llama-3.1-8b-instruct",
         "qwen/qwen-2.5-14b-instruct",
     ]
+    # "deepseek/deepseek-chat-v3-0324:free" - Вырезан из списка по причине плохой работы
     # Deduplicate while preserving order and removing empties
     seen = set()
     result = []

@@ -2,16 +2,12 @@ import logging
 import time
 import asyncio
 import datetime
-import os
-from datetime import timezone
 from telethon import utils
-import html as _html
 from database.db_connection import get_channel_category, get_category_users, add_post, get_expired_clusters, \
     get_main_post_for_cluster, get_active_clusters, get_posts_by_cluster, archive_cluster, get_posts_in_active_clusters, \
     update_post_status, get_cluster_id_by_post, update_cluster_status, \
     get_posts_by_cluster_with_reputation, log_cluster_score, get_system_param, recalc_channel_reputation, \
     get_cluster_metadata, get_latest_cluster_scores, get_recent_clusters, get_cluster_posts_full
-from AI.Ai_Functions import get_embedding
 from AI.clustering import process_post_and_cluster
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram import types
@@ -370,9 +366,6 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                     reasons.append(f"posts<count_min ({min_posts_in_cluster})")
                 logger.info(f"[PUBLISH] Кластер {cluster_id} не опубликован: {', '.join(reasons)}")
         await asyncio.sleep(interval)
-
-
-# Удалён периодический ad_filter_task: проверка рекламы выполняется только при получении поста
 
 
 async def reputation_refresher_task(interval_seconds: int = 21600):
