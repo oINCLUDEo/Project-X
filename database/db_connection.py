@@ -2,6 +2,8 @@ import psycopg2
 from psycopg2.extras import Json
 import logging
 from config.config import load_config
+import time
+from typing import Dict, Tuple
 
 __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_user', 'add_channel', 'update_channel_info',
            'add_post', 'create_new_cluster', 'add_post_to_cluster', 'get_recent_clusters_with_embeddings',
@@ -19,6 +21,9 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'put_generated_article']
 logger = logging.getLogger(__name__)
 config = load_config()
+
+_SYS_PARAMS_CACHE: Dict[str, Tuple[str, float]] = {}
+_SYS_PARAMS_TTL_SECONDS = 90.0
 
 def _get_db_connection():
     """
@@ -802,12 +807,31 @@ def get_post_prev_metrics(post_id: int):
             }
 
 def get_system_param(key: str, default: str | None = None):
+    """Извлекает системный параметр с TTL-кэшем
+
+    Notes:
+    - Кэширует значения на короткий период, чтобы уменьшить нагрузку на базу данных.
+    - НЕ используйте это для секретов; секреты должны поступать из env/secret manager.
+    """
+    now = time.time()
+    cached = _SYS_PARAMS_CACHE.get(key)
+    if cached is not None:
+        value, expires_at = cached
+        if now < expires_at:
+            return value
+        else:
+            _SYS_PARAMS_CACHE.pop(key, None)
+
     query = "SELECT param_value FROM system_params WHERE param_key = %s;"
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(query, (key,))
             row = cur.fetchone()
-            return row[0] if row else default
+            if row:
+                value = row[0]
+                _SYS_PARAMS_CACHE[key] = (value, now + _SYS_PARAMS_TTL_SECONDS)
+                return value
+            return default
 
 def set_system_param(key: str, value: str):
     query = """
@@ -819,6 +843,8 @@ def set_system_param(key: str, value: str):
         with conn.cursor() as cur:
             cur.execute(query, (key, value))
             conn.commit()
+    # Инвалидирует кэш немедленно
+    _SYS_PARAMS_CACHE.pop(key, None)
 
 def log_cluster_score(cluster_id: int, algorithm: str, score: float):
     query = """

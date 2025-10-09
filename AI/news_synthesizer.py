@@ -69,15 +69,15 @@ def _get_style_prefs() -> Dict:
         Dict: Словарь с настройками стиля
     """
     try:
-        style = (get_system_param('content_style', 'auto'))
+        style = get_system_param('content_style', 'auto')
     except Exception:
         style = 'auto'
     try:
-        tone = (get_system_param('content_tone', 'neutral'))
+        tone = get_system_param('content_tone', 'neutral')
     except Exception:
         tone = 'neutral'
     try:
-        headings = (get_system_param('content_headings_enabled', '0'))
+        headings = get_system_param('content_headings_enabled', '0')
     except Exception:
         headings = False
     try:
@@ -466,19 +466,20 @@ def _get_model_candidates(preferred: str | None) -> List[str]:
         models = [m.strip() for m in raw.split(",") if m.strip()]
         if models:
             return models
-    # Free tier models for news synthesis via OpenRouter
-    # Priority order: Best free quality → Reliable fallbacks
+    # Бесплатные модели для синтеза новостей через OpenRouter
+    # Порядок приоритета: Лучшее качество → Надежные запасные варианты
     defaults = [
         preferred or os.getenv("OPENAI_MODEL", ""),
-        # Top free tier models for news synthesis
-        "mistralai/mistral-small-3.2-24b-instruct:free",  # Best free model, 24B parameters
-        "z-ai/glm-4.5-air:free",                          # GLM 4.5 Air, good for text generation
-        "mistralai/mistral-7b-instruct:free",             # Classic Mistral 7B, proven performance
-        "mistralai/devstral-small-2505:free",             # Devstral Small, software-focused but adaptable
-        # Last resort fallback
-        "deepseek/deepseek-chat-v3-0324:free",           # Previously removed due to poor performance
+        # Лучшие бесплатные модели для синтеза новостей
+        "z-ai/glm-4.5-air:free",                          # GLM 4.5 Air, хороша для генерации текста
+        "mistralai/mistral-small-3.2-24b-instruct:free",  # Лучшая бесплатная модель, 24 миллиарда параметров
+        "mistralai/mistral-7b-instruct:free",             # Классическая Mistral 7B, проверенная производительность
+        "mistralai/devstral-small-2505:free",             # Devstral Small, ориентирована на ПО, но адаптируема
+        # Крайний резервный вариант
+        "deepseek/deepseek-chat-v3-0324:free",           # Ранее удалена из-за низкой производительности
     ]
-    # Deduplicate while preserving order and removing empties
+    # TODO: Не уверен что это нужно
+    # Удалить дубликаты с сохранением порядка и удалением пустых значений
     seen = set()
     result = []
     for m in defaults:

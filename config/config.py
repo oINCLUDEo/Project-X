@@ -1,6 +1,9 @@
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from pydantic import Field, ValidationError
+from pydantic_settings import BaseSettings
+from typing import Optional
 
 
 @dataclass
@@ -35,28 +38,89 @@ class Config:
     telethon_client: TelethonClient
     db: DatabaseConfig
     storage: StorageConfig
+    # Optional, not used everywhere but validated and available
+    dev_logs: bool | None = None
+    openai_base_url: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
+    openrouter_referer: Optional[str] = None
+    openrouter_title: Optional[str] = None
+
+
+class EnvSettings(BaseSettings):
+    # Aiogram
+    BOT_TOKEN: str
+
+    # Telethon
+    API_ID: int
+    API_HASH: str
+    TG_ACCOUNT_PARSER_PASSWORD: str
+
+    # Database
+    DB_NAME: str
+    DB_USER: str
+    DB_PASSWORD: str
+    DB_HOST: str = Field(default="localhost")
+    DB_PORT: int = Field(default=5432)
+
+    # Storage
+    MEDIA_DIR: str = Field(default="media")
+
+    # Optional
+    DEV_LOGS: bool | None = None
+
+    # OpenRouter
+    OPENAI_BASE_URL: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: Optional[str] = None
+    OPENROUTER_REFERER: Optional[str] = None
+    OPENROUTER_TITLE: Optional[str] = None
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
 
 
 def load_config() -> Config:
-    load_dotenv()   # Загрузка переменных окружения из файла .env
+    """Загружает и проверяет конфигурацию из переменных окружения.
+
+    Сохраняет существующий возвращаемый тип на основе dataclass Config,
+    но использует Pydantic для типизированного парсинга, значений по умолчанию
+    и валидации. Это позволяет другим модулям продолжать использовать
+    load_config() без изменений.
+    """
+    # Гарантируем чтение .env файла для совместимости с не-Pydantic компонентами
+    load_dotenv()
+    try:
+        env = EnvSettings()  # type: ignore[call-arg]
+    except ValidationError as e:
+        # Перевыбрасываем исключение с понятным сообщением для упрощения отладки
+        raise RuntimeError(f"[CONFIG] Неверная конфигурация окружения: {e}")
 
     return Config(
         aiogram_bot=AiogramBot(
-            token=os.getenv('BOT_TOKEN')
+            token=env.BOT_TOKEN
         ),
         telethon_client=TelethonClient(
-            api_id=int(os.getenv('API_ID')),
-            api_hash=os.getenv('API_HASH'),
-            password=os.getenv('TG_ACCOUNT_PARSER_PASSWORD')
+            api_id=env.API_ID,
+            api_hash=env.API_HASH,
+            password=env.TG_ACCOUNT_PARSER_PASSWORD
         ),
         db=DatabaseConfig(
-            db_name=os.getenv('DB_NAME'),
-            db_host=os.getenv('DB_HOST'),
-            db_user=os.getenv('DB_USER'),
-            db_password=os.getenv('DB_PASSWORD'),
-            db_port=os.getenv('DB_PORT')
+            db_name=env.DB_NAME,
+            db_host=env.DB_HOST,
+            db_user=env.DB_USER,
+            db_password=env.DB_PASSWORD,
+            db_port=str(env.DB_PORT)
         ),
         storage=StorageConfig(
-            media_dir=os.getenv('MEDIA_DIR', 'media')
-        )
+            media_dir=env.MEDIA_DIR
+        ),
+        # Опциональные параметры
+        dev_logs=env.DEV_LOGS,
+        openai_base_url=env.OPENAI_BASE_URL,
+        openai_api_key=env.OPENAI_API_KEY,
+        openai_model=env.OPENAI_MODEL,
+        openrouter_referer=env.OPENROUTER_REFERER,
+        openrouter_title=env.OPENROUTER_TITLE,
     )
