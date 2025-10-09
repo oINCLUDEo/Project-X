@@ -7,8 +7,7 @@ from database.db_connection import get_channel_category, get_category_users, add
     get_main_post_for_cluster, get_active_clusters, get_posts_by_cluster, archive_cluster, get_posts_in_active_clusters, \
     update_post_status, get_cluster_id_by_post, update_cluster_status, \
     get_posts_by_cluster_with_reputation, log_cluster_score, get_system_param, recalc_channel_reputation, \
-    get_cluster_metadata, get_latest_cluster_scores, get_recent_clusters, get_cluster_posts_full
-from AI.clustering import process_post_and_cluster
+    get_cluster_metadata, get_latest_cluster_scores, get_recent_clusters, get_cluster_posts_full, put_generated_article
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram import types
 from aiogram.enums import ParseMode
@@ -16,6 +15,7 @@ from aiogram_bot.keyboards import get_feedback_keyboard
 
 from helpers.ad_helper import compute_ad_score, process_post_for_ad_check
 from AI.Ai_Functions import predict_ad_probability, get_embedding
+from AI.clustering import process_post_and_cluster
 from helpers.helpers import compute_cluster_score, get_users_for_post
 from AI.content_generator import generate_unique_content
 from AI.news_synthesizer import synthesize_news
@@ -342,6 +342,9 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                             as_list = list(main_post)
                             as_list[2] = unique_text
                             main_post = tuple(as_list)
+
+                            model_name = meta.get('model') if isinstance(meta, dict) else None
+                            put_generated_article(cluster_id, mode, unique_text, model_name)
                     except Exception as e:
                         logger.error(f"[CONTENT] Ошибка генерации уникального контента для кластера {cluster_id}: {e}", exc_info=True)
                 else:

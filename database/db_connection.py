@@ -16,7 +16,7 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_channel_reputation', 'get_channel_reputation_by_post_id', 'get_cluster_metadata',
            'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores',
            'record_user_feedback', 'get_cluster_posts_full',
-           'get_cached_generated_article', 'put_cached_generated_article']
+           'put_generated_article']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -931,80 +931,21 @@ def get_channel_reputation_by_post_id(post_id: int) -> float:
             return float(row[0]) if row and row[0] is not None else 0.5
 
 
-def _ensure_generated_articles_table(cur) -> None:
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS generated_articles (
-            id SERIAL PRIMARY KEY,
-            cluster_id INTEGER NOT NULL REFERENCES clusters(cluster_id) ON DELETE CASCADE,
-            mode VARCHAR(2) NOT NULL,
-            prompt_hash VARCHAR(128) NOT NULL,
-            model_name VARCHAR(128),
-            text TEXT NOT NULL,
-            facts_json JSONB,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_generated_articles_cluster_mode_hash
-            ON generated_articles(cluster_id, mode, prompt_hash);
-        """
-    )
-
-
-def get_cached_generated_article(cluster_id: int, mode: str, prompt_hash: str) -> dict | None:
+def put_generated_article(cluster_id: int, mode: str,
+                          text: str, model_name: str | None,
+                          facts_json: dict | None = None) -> int:
     """
-    Возвращает последнюю сгенерированную статью из кэша для кластера/режима/хэша.
+    Сохраняет сгенерированный текст в БД
     """
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
-            try:
-                _ensure_generated_articles_table(cur)
-            except Exception:
-                pass
             cur.execute(
                 """
-                SELECT id, model_name, text, facts_json, created_at
-                FROM generated_articles
-                WHERE cluster_id = %s AND mode = %s AND prompt_hash = %s
-                ORDER BY created_at DESC
-                LIMIT 1;
-                """,
-                (cluster_id, mode, prompt_hash),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {
-                'id': row[0],
-                'model_name': row[1],
-                'text': row[2],
-                'facts_json': row[3],
-                'created_at': row[4],
-            }
-
-
-def put_cached_generated_article(cluster_id: int, mode: str, prompt_hash: str,
-                                 text: str, model_name: str | None,
-                                 facts_json: dict | None = None) -> int:
-    """
-    Сохраняет сгенерированный текст в кэш.
-    """
-    with _get_db_connection() as conn:
-        with conn.cursor() as cur:
-            try:
-                _ensure_generated_articles_table(cur)
-            except Exception:
-                pass
-            cur.execute(
-                """
-                INSERT INTO generated_articles(cluster_id, mode, prompt_hash, model_name, text, facts_json)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO generated_articles(cluster_id, mode, model_name, text, facts_json)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
-                (cluster_id, mode, prompt_hash, model_name, text, Json(facts_json) if facts_json is not None else None),
+                (cluster_id, mode, model_name, text, Json(facts_json) if facts_json is not None else None),
             )
             new_id = cur.fetchone()[0]
             conn.commit()

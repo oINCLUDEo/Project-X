@@ -345,7 +345,11 @@ def _build_prompt_mode_a(anchor: Dict, others: List[Dict], has_media: bool = Fal
     
     system = (
         "Ты — нейтральный редактор новостей. Пиши фактически, без эмоций и оценочных суждений. "
-        "Используй только предоставленные тексты постов. Не выдумывай фактов. Если данные расходятся, укажи это. "
+        "Используй только предоставленные тексты постов. Не выдумывай фактов и не делай предположений. "
+        "Если данные расходятся — явно укажи противоречие без попытки интерпретации. "
+        "Не повторяй один и тот же факт разными формулировками и не дублируй детали. "
+        "Короткие ясные предложения (предпочтительно 12–20 слов), прямой порядок слов, без канцеляризмов. "
+        "Соблюдай грамматическую и смысловую согласованность, проверяй числительные и единицы измерения. "
         f"ВАЖНО: Длина итогового текста не должна превышать {limit_text} для корректной отправки в Telegram. "
         + _compose_style_instructions()
     )
@@ -367,9 +371,14 @@ def _build_prompt_mode_a(anchor: Dict, others: List[Dict], has_media: bool = Fal
     len_hint = f"Сделай {min_p}–{max_p} абзацев." if min_p != max_p else f"Сделай {min_p} абзац(а)."
 
     user = (
-        "Перепиши якорный пост нейтрально и добавь проверенные детали из других постов.\n"
-        "Сделай первый ключевой факт выразительным (можно выделить <b>жирным</b>), затем плавно раскрой детали.\n"
-        "Цитаты допустимо выделять <i>курсивом</i>. Не добавляй новых фактов.\n"
+        "Перепиши якорный пост нейтрально и добавь только те детали, которые явно присутствуют в других постах.\n"
+        "Приоритет фактов из якорного поста сохраняй, дополнения — краткие и без повтора сказанного.\n"
+        "Сделай первый ключевой факт выразительным (можно выделить <b>жирным</b>), далее — логичное раскрытие.\n"
+        "Цитаты допустимо выделять <i>курсивом</i>.\n"
+        "Строго запрещено: домысливать, дополнять контекстом, которого нет в источниках, использовать гипотезы или вероятностные формулировки.\n"
+        "Если конкретики в дополнительных постах нет — просто не добавляй их содержание.\n"
+        "Если фактов слишком мало (меньше одного-двух коротких предложений), дай один осторожный абзац без домыслов.\n"
+        "Не повторяй факты, избегай тавтологий и дубликатов чисел/имен/локаций.\n"
         f"{len_hint}\n\n"
         + anchor_block
         + "\n\nДополнительные источники:\n"
@@ -400,7 +409,11 @@ def _build_prompt_mode_b(posts: List[Dict], has_media: bool = False) -> Tuple[st
     limit_text = f"{char_limit} символов"
     
     system = (
-        "Ты — редактор постов различного характера. "
+        "Ты — редактор постов различного характера. Пиши фактически и нейтрально, без эмоций и оценок. "
+        "Используй только предоставленные источники. Не выдумывай фактов и не делай предположений. "
+        "Явно отмечай противоречия, не пытаясь их объяснять. "
+        "Не повторяй один и тот же факт разными формулировками, избегай тавтологий и дубликатов. "
+        "Короткие ясные предложения (12–20 слов), логичный порядок фактов, согласование терминов/единиц. "
         f"ВАЖНО: Длина итогового текста не должна превышать {limit_text} для корректной отправки в Telegram. "
         + _compose_style_instructions()
     )
@@ -421,9 +434,10 @@ def _build_prompt_mode_b(posts: List[Dict], has_media: bool = False) -> Tuple[st
     len_hint = f"Сделай {min_p}–{max_p} абзацев." if min_p != max_p else f"Сделай {min_p} абзац(а)."
 
     user = (
-        "Синтезируй цельный текст заметки.\n"
-        f"Первый ключевой факт можно выделить <b>жирным</b>. Детали раскрой плавно, цитаты — <i>курсивом</i>. {headline_hint}{len_hint}\n"
-        "Требования: не добавляй фактов, которых нет в источниках.\n"
+        "Синтезируй цельный текст заметки по всем источникам.\n"
+        f"Первый ключевой факт можно выделить <b>жирным</b>. Детали — логично и без повторов. Цитаты — <i>курсивом</i>. {headline_hint}{len_hint}\n"
+        "Строго запрещено: домыслы, гипотезы, вероятностные обороты, расширение контекста сверх текста источников.\n"
+        "Если фактов мало — дай один очень короткий аккуратный абзац без новых сведений.\n"
         "Если есть противоречия — укажи их нейтрально. Вывод строго в HTML, без Markdown и без кода.\n\n"
         + "\n\n".join(blocks)
         + "\n\nВыведи только HTML-текст"
@@ -452,13 +466,18 @@ def _get_model_candidates(preferred: str | None) -> List[str]:
         models = [m.strip() for m in raw.split(",") if m.strip()]
         if models:
             return models
-    # Sane defaults for OpenRouter
+    # Free tier models for news synthesis via OpenRouter
+    # Priority order: Best free quality → Reliable fallbacks
     defaults = [
         preferred or os.getenv("OPENAI_MODEL", ""),
-        "meta-llama/llama-3.1-8b-instruct",
-        "qwen/qwen-2.5-14b-instruct",
+        # Top free tier models for news synthesis
+        "mistralai/mistral-small-3.2-24b-instruct:free",  # Best free model, 24B parameters
+        "z-ai/glm-4.5-air:free",                          # GLM 4.5 Air, good for text generation
+        "mistralai/mistral-7b-instruct:free",             # Classic Mistral 7B, proven performance
+        "mistralai/devstral-small-2505:free",             # Devstral Small, software-focused but adaptable
+        # Last resort fallback
+        "deepseek/deepseek-chat-v3-0324:free",           # Previously removed due to poor performance
     ]
-    # "deepseek/deepseek-chat-v3-0324:free" - Вырезан из списка по причине плохой работы
     # Deduplicate while preserving order and removing empties
     seen = set()
     result = []
@@ -545,37 +564,9 @@ def _llm_generate(system: str, user: str, model: str | None = None, max_output_t
                     time.sleep(backoff_s)
                     backoff_s = min(backoff_s * 2.0, 6.0)
                     continue
-                # Фолбэк к legacy клиенту для этой же модели
-                try:
-                    import openai as openai_legacy  # type: ignore
-                    openai_legacy.api_key = api_key
-                    if base_url:
-                        openai_legacy.api_base = base_url
-                    logger.info(f"[SYNTH] Legacy LLM try model={used_model}")
-                    resp = openai_legacy.ChatCompletion.create(
-                        model=used_model,
-                        temperature=0.2,
-                        max_tokens=max_output_tokens,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                    )
-                    content = resp["choices"][0]["message"]["content"]
-                    return (content or "").strip(), used_model
-                except Exception as e2:
-                    if _is_ratelimit_error(e2) and (idx + 1) < len(candidates):
-                        logger.warning(f"[SYNTH] Rate-limited (legacy) on model={used_model}, will try next after {backoff_s:.1f}s")
-                        time.sleep(backoff_s)
-                        backoff_s = min(backoff_s * 2.0, 6.0)
-                        continue
-                    logger.error(f"[SYNTH] Model {used_model} failed: {e2}")
-                    # Если это последняя — прорвёмся наружу к общему except
-                    if (idx + 1) == len(candidates):
-                        raise e2
-                    # Иначе пробуем следующую без задержки
-                    continue
-    except Exception as e:  # pragma: no cover
+                logger.error(f"[SYNTH] Model {used_model} failed: {e1}")
+                continue
+    except Exception as e:
         logger.error(f"[SYNTH] OpenAI call failed: {e}", exc_info=True)
         return None, None
 
