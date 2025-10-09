@@ -24,13 +24,35 @@ handlers:
     formatter: default
 
 loggers:
+  aiogram_bot:
+    level: INFO
+    handlers: [file]
+    propagate: false
+
+  telethon_client:
+    level: DEBUG
+    handlers: [file, default]
+    propagate: false
+
+  helpers:
+    level: INFO
+    handlers: [ file, default ]
+    propagate: false
+
+  AI:
+    level: INFO
+    handlers: [file, default]
+    propagate: false
+
   database.db_connection:
     level: INFO
     handlers: [default]
+    propagate: false
 
   __main__:
     level: DEBUG
     handlers: [default]
+    propagate: false
 
 root:
   formatter: default
