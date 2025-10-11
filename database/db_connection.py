@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import psycopg2
 from psycopg2.extras import Json
 import logging
@@ -18,7 +20,8 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_channel_reputation', 'get_channel_reputation_by_post_id', 'get_cluster_metadata',
            'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores',
            'record_user_feedback', 'get_cluster_posts_full',
-           'put_generated_article']
+           'put_generated_article', 'get_generated_article_cluster_id_by_text_prefix',
+           'get_generated_articles_by_date']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -977,3 +980,62 @@ def put_generated_article(cluster_id: int, mode: str,
             conn.commit()
             return new_id
 
+
+def get_generated_articles_by_date(date: str) -> list[dict]:
+    """
+    Возвращает сгенерированные статьи, созданные в окне времени вокруг переданной даты.
+
+    Notes:
+    - Ширина окна настраивается системным параметром 'generated_lookup_window_seconds'
+    """
+    # Читаем ширину окна поиска (в секундах); по умолчанию 2 секунды
+    try:
+        window_seconds_raw = get_system_param('generated_lookup_window_seconds', '300')
+        window_seconds = int(window_seconds_raw) if window_seconds_raw is not None else 300
+    except Exception:
+        window_seconds = 300
+
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Сопоставляем по времени с учетом окна
+            cur.execute(
+                """
+                SELECT cluster_id, text, created_at
+                FROM generated_articles
+                WHERE created_at BETWEEN %s::timestamp - make_interval(secs => %s) AND %s::timestamp + make_interval(secs => %s)
+                ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - %s::timestamp))) ASC
+                """,
+                (date, window_seconds, date, window_seconds, date),
+            )
+            rows = cur.fetchall()
+            logger.info("Вывод ROWS: %s", rows)
+            return [
+                { 'cluster_id': r[0], 'text': r[1] or '', 'created_at': r[2] }
+                for r in rows
+            ]
+
+
+def get_generated_article_cluster_id_by_text_prefix(prefix: str, min_prefix_len: int = 40) -> int | None:
+    """
+    Ищет cluster_id по префиксу текста сгенерированной статьи (по первым N символам).
+    """
+    if not prefix:
+        return None
+    normalized = (prefix or "").strip().replace("\n", " ")
+    if len(normalized) < min_prefix_len:
+        return None
+    candidate = normalized[:min_prefix_len]
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cluster_id
+                FROM generated_articles
+                WHERE LEFT(text, %s) = %s
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                (min_prefix_len, candidate),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
