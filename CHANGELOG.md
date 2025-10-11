@@ -7,7 +7,7 @@
   - Агрегированная статистика кластера (просмотры, реакции, комментарии, репосты)
 
 ### Исправлено:
-- fix(db): исправлены функции get_generated_articles_by_date и get_generated_article_cluster_id_by_text_prefix
+- fix(db): исправлены функции get_generated_articles_by_date, get_generated_article_cluster_id_by_text_prefix и get_cluster_metadata
 
 ## [1.0.3] - 2025-10-09
 ### Добавлено:
