@@ -137,7 +137,7 @@ async def cmd_info(message: Message):
 
             header = (
                 f"<b>Кластер #{cluster_id}</b>\n"
-                f"Статус: <code>{(meta.get('status') or 'unknown') if meta else 'unknown'}</code>\n"
+                f"Статус: <code>{meta.get('status')}</code>\n"
                 f"Создан: <code>{meta.get('created_at')}</code> | Истекает: <code>{meta.get('expires_at')}</code>\n"
                 f"Постов: <b>{len(posts)}</b>\n\n"
             )

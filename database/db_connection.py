@@ -656,7 +656,7 @@ def get_cluster_metadata(cluster_id: int):
     Возвращает метаданные кластера: created_at, expires_at, post_count.
     """
     query = """
-        SELECT created_at, expires_at, post_count
+        SELECT created_at, expires_at, post_count, status
         FROM clusters WHERE cluster_id = %s;
     """
     with _get_db_connection() as conn:
@@ -668,7 +668,8 @@ def get_cluster_metadata(cluster_id: int):
             return {
                 'created_at': row[0],
                 'expires_at': row[1],
-                'post_count': row[2] or 0
+                'post_count': row[2],
+                'status' : row[3]
             }
 
 def get_posts_by_cluster_with_reputation(cluster_id):
@@ -1008,7 +1009,6 @@ def get_generated_articles_by_date(date: str) -> list[dict]:
                 (date, window_seconds, date, window_seconds, date),
             )
             rows = cur.fetchall()
-            logger.info("Вывод ROWS: %s", rows)
             return [
                 { 'cluster_id': r[0], 'text': r[1] or '', 'created_at': r[2] }
                 for r in rows
