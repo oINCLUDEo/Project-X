@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from pydantic import Field, ValidationError
@@ -94,7 +93,7 @@ def load_config() -> Config:
     try:
         env = EnvSettings()  # type: ignore[call-arg]
     except ValidationError as e:
-        # Перевыбрасываем исключение с понятным сообщением для упрощения отладки
+        # Пробрасываем исключение с понятным сообщением для упрощения отладки
         raise RuntimeError(f"[CONFIG] Неверная конфигурация окружения: {e}")
 
     return Config(

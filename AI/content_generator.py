@@ -1,13 +1,7 @@
 import logging
 from typing import List, Dict, Tuple
 
-
-
-
 logger = logging.getLogger(__name__)
-
-
-
 
 
 def _insert_native_ad(text: str, ad_snippet: str | None) -> str:
@@ -25,16 +19,18 @@ def _insert_native_ad(text: str, ad_snippet: str | None) -> str:
     return result
 
 
-def generate_unique_content(cluster_posts: List[Dict], method: str = "auto",
-                            native_ad: str | None = None) -> Tuple[str, Dict]:
+# TODO: Ни о какой уникальности нет речи, оно просто берет готовый пост и вставляет свою плашку.
+#  Стоит улучшить работу fallback, либо снести задумку
+def generate_unique_content(cluster_posts: List[Dict], native_ad: str | None = None) -> Tuple[str, Dict]:
     """
     Простой пайплайн уникализации:
     1) берем контент главного поста
     2) нативная вставка рекламы
+
     Возвращает итоговый текст и метаданные процесса
     """
     if not cluster_posts:
-        return "", {"summary_method": "empty"}
+        return "", {"model": "empty"}
 
     # Берем контент первого поста (главного)
     main_post_content = cluster_posts[0].get('content', '') if cluster_posts else ''
@@ -43,12 +39,6 @@ def generate_unique_content(cluster_posts: List[Dict], method: str = "auto",
     final_text = _insert_native_ad(main_post_content, native_ad)
 
     meta = {
-        "summary_method": "main_post",
-        "input_posts": len(cluster_posts),
+        "model": "main_post"
     }
     return final_text, meta
-
-
-
-
-

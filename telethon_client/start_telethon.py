@@ -60,9 +60,8 @@ async def update_engagement_for_active_cluster_posts(client, interval=300):
             logger.error(f'[ENGAGEMENT] Ошибка в основном цикле: {e}', exc_info=True)
         await asyncio.sleep(interval)
 
-def setup_handlers(client, channels, bot):
-    # Ensure media directory exists at startup
+def setup_handlers(client, channels):
     cfg = load_config()
     os.makedirs(cfg.storage.media_dir, exist_ok=True)
-    client.add_event_handler(lambda event: album_handler(event, bot), events.Album(chats=channels))
-    client.add_event_handler(lambda event: default_handler(event, bot), events.NewMessage(chats=channels))
+    client.add_event_handler(lambda event: album_handler(event), events.Album(chats=channels))
+    client.add_event_handler(lambda event: default_handler(event), events.NewMessage(chats=channels))

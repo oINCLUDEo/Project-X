@@ -25,20 +25,20 @@ RE_CTA = re.compile(
     r'\b(нажми|подпишись|позвони|забронируй|получи|ответь|зарегистрируйся|купить|заказать|получить предложение|'
     r'переходи|оформи|отправь|заходи|смотри|бронируй|присоединяйся|получить скидку|выиграй)\b', re.I)
 RE_HASHTAG_AD = re.compile(r'#реклама|#promo|#advertisement|#ads|#рекламка', re.I)
-RE_LINK = re.compile(r'https?://[^\s]+')
+RE_LINK = re.compile(r'https?://\S+')
 RE_HREF = re.compile(r'href\s*=\s*"(https?://[^\"]+)"', re.I)
 RE_ERID = re.compile(r'\berid\s*[:=]\s*[A-Za-z0-9\-]{6,}', re.I)
 RE_CONTACTS = re.compile(r'@\w+|\+?\d[\d\-\s]{7,}', re.I)
 RE_PROMO = re.compile(r'промокод\s*[A-Za-z0-9]+', re.I)
-RE_PRICE = re.compile(r'(\d+[\s\,]?\d*)\s*(₽|руб\.?|рублей|р\b)', re.I)
+RE_PRICE = re.compile(r'(\d+[\s,]?\d*)\s*(₽|руб\.?|рублей|р\b)', re.I)
 # Проценты вида -40%, 40%, допустимы разные тире; избегаем \b, чтобы ловить начало со знака
 RE_PERCENT = re.compile(r'(?<!\w)[\-−–—]?\d{1,3}\s?%(?!\w)')
 # Маркер рекламной пометки отдельной строкой/в скобках; допускаем ссылку в скобках после точки
 RE_AD_TAG_LINE = re.compile(
-    r'(^|\n|\()\s*(реклама|advertisement|ads|promo)\s*([\.|!|:|,|\)])?(\s*\(https?://[^\s)]+\))?\s*$',
+    r'(^|\n|\()\s*(реклама|advertisement|ads|promo)\s*([.!:,])?(\s*\(https?://[^\s)]+\))?\s*$',
     re.I | re.M
 )
-RE_AD_LEGAL = re.compile(r'(^|\n)\s*реклама\s*[,\.:!\-]\s*(ООО|ИП|АО|ОАО|ПАО)\b', re.I)
+RE_AD_LEGAL = re.compile(r'(^|\n)\s*реклама\s*[,.:!-]\s*(ООО|ИП|АО|ОАО|ПАО)\b', re.I)
 
 # Часто встречающиеся короткие паттерны для кэша
 COMMON_PATTERNS = [
@@ -56,37 +56,31 @@ def compute_ad_score(post, past_posts_texts, heat_score, channel_trust_level,
         text = get_post_content_by_id(post['post_id']) or ""
         text_len = max(1, len(text))  # избегаем деления на 0
 
-        # 1. Keyword score
+        # 1. Оценка по ключевым словам
         keyword_count = len(RE_AD_KEYWORDS.findall(text))
         keyword_score = min(keyword_count / 5, 1.0)
-
-        # 2. Link density
+        # 2. Плотность ссылок
         link_count = len(RE_LINK.findall(text))
         link_density = min(link_count / (text_len / 100), 1.0)
-
-        # 3. CTA score
+        # 3. Оценка призывов к действию (CTA)
         cta_count = len(RE_CTA.findall(text))
         cta_score = min(cta_count / 3, 1.0)
-
-        # 4. Suspicious engagement, учитывая репутацию источника
+        # 4. Подозрительная активность, с учётом репутации источника
         channel_rep = get_channel_reputation_by_post_id(post['post_id'])
         trust = max(channel_trust_level, channel_rep)
         suspicious_engagement = 1.0 if heat_score > 0.8 and trust < 0.3 else 0.0
-
-        # 5. Template similarity
+        # 5. Схожесть с шаблонами
         template_similarity = 0.0
         if past_posts_texts:
             corpus = [text] + past_posts_texts
             vec = TfidfVectorizer().fit_transform(corpus)
             sim_matrix = cosine_similarity(vec[0:1], vec[1:])
             template_similarity = float(np.max(sim_matrix))  # максимальное сходство с прошлым постом
-
-        # 6. Hashtag ad presence
+        # 6. Наличие рекламных хэштегов
         hashtag_ad_score = 1.0 if RE_HASHTAG_AD.search(text) else 0.0
-
-        # 7. Contacts/promocode/price presence
+        # 7. Наличие контактов/промокодов/цен
         contacts_score = 1.0 if (RE_CONTACTS.search(text) or RE_PROMO.search(text) or RE_PRICE.search(text)) else 0.0
-
+        # Итоговый рекламный score
         ad_score = (w1 * keyword_score +
                     w2 * link_density +
                     w3 * cta_score +
@@ -104,8 +98,8 @@ def compute_ad_score(post, past_posts_texts, heat_score, channel_trust_level,
 def process_post_for_ad_check(post, ad_threshold, channel_trust_level = 0.3, model_pred_func=None, model_version: str | None = None):
     """
     Двухуровневая проверка рекламного контента:
-    - Stage 1: быстрый префильтр по правилам и признакам (compute_ad_score)
-    - Stage 2: AI-модель (если Stage 1 в серой зоне)
+    - Этап 1: быстрый фильтр по правилам и признакам (compute_ad_score)
+    - Этап 2: AI-модель (если Stage 1 в серой зоне)
 
     model_pred_func: Callable[[str], float] возвращает вероятность рекламы [0..1]
     """
@@ -125,7 +119,7 @@ def process_post_for_ad_check(post, ad_threshold, channel_trust_level = 0.3, mod
 
         # Явные правила: рекламная пометка отдельной строкой/в скобках 
         # или HTML-якорь с текстом "Реклама." / "Реклама" → сразу реклама
-        if RE_AD_TAG_LINE.search(text) or re.search(r'>\s*реклама[\.,!]?\s*<', text, re.I) or RE_AD_LEGAL.search(text):
+        if RE_AD_TAG_LINE.search(text) or re.search(r'>\s*реклама[.,!]?\s*<', text, re.I) or RE_AD_LEGAL.search(text):
             insert_ad_decision(post['post_id'], 1, 1.0, 'ad', None, {'rule': 'ad_tag_line'})
             update_post_status(post['post_id'], "ad")
             cluster_id = get_cluster_id_by_post(post['post_id'])

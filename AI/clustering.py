@@ -18,7 +18,7 @@ def find_similar_cluster(new_embedding: list[float], recent_clusters: list[tuple
     return None, max_similarity
 
 
-def process_post_and_cluster(channel_tg_id: int, embedding: list[float], post_id: int):
+def process_post_and_cluster(embedding: list[float], post_id: int):
     """Определяет, кластеризовать пост или создать новый кластер.
 
     Принимает уже рассчитанный embedding, чтобы избежать повторного вычисления.

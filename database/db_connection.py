@@ -1,5 +1,3 @@
-from datetime import datetime
-
 import psycopg2
 from psycopg2.extras import Json
 import logging
@@ -21,7 +19,7 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores',
            'record_user_feedback', 'get_cluster_posts_full',
            'put_generated_article', 'get_generated_article_cluster_id_by_text_prefix',
-           'get_generated_articles_by_date']
+           'get_generated_articles_by_date', 'get_active_clusters']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -993,7 +991,8 @@ def get_generated_articles_by_date(date: str) -> list[dict]:
     try:
         window_seconds_raw = get_system_param('generated_lookup_window_seconds', '300')
         window_seconds = int(window_seconds_raw) if window_seconds_raw is not None else 300
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[DB] Ошибка получения окна времени {e}")
         window_seconds = 300
 
     with _get_db_connection() as conn:
@@ -1003,8 +1002,8 @@ def get_generated_articles_by_date(date: str) -> list[dict]:
                 """
                 SELECT cluster_id, text, created_at
                 FROM generated_articles
-                WHERE created_at BETWEEN %s::timestamp - make_interval(secs => %s) AND %s::timestamp + make_interval(secs => %s)
-                ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - %s::timestamp))) ASC
+                WHERE created_at BETWEEN %s::timestamp - INTERVAL '%s seconds' AND %s::timestamp + INTERVAL '%s seconds'
+                ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - %s::timestamp)))
                 """,
                 (date, window_seconds, date, window_seconds, date),
             )

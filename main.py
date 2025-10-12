@@ -17,36 +17,43 @@ dp = Dispatcher()
 
 
 async def start_telethon():
-    # Инициализация Telethon Клиента
-    client = TelegramClient(
-        session='news_parser',
-        device_model="iPhone 13 Pro Max",
-        system_version="14.8.1",
-        app_version="10.1",
-        api_id=config.telethon_client.api_id,
-        api_hash=config.telethon_client.api_hash
-    )
-    client.parse_mode = 'html'
-    channels = get_channels() # Загрузка каналов для прослушивания
-    logger.debug("Список каналов: %s", channels)
+    # Используем контекстный менеджер для автоматического управления соединением
+    async with TelegramClient(
+            session='news_parser',
+            device_model="iPhone 13 Pro Max",
+            system_version="14.8.1",
+            app_version="10.1",
+            api_id=config.telethon_client.api_id,
+            api_hash=config.telethon_client.api_hash
+    ) as client:
+        client.parse_mode = 'html'
+        channels = get_channels()
+        logger.debug("Список каналов: %s", channels)
 
-    # Загрузка обработчиков
-    setup_handlers(client, channels, bot)
-    logger.info("Авторизация в аккаунт")
-    await client.start(password=config.telethon_client.password)
-    logger.info("Авторизация успешна")
-    logger.info("Парсер новостных каналов успешно запущен")
-    # Запуск таска обновления просмотров
-    engagement_task = asyncio.create_task(update_engagement_for_active_cluster_posts(client))
-    await client.run_until_disconnected()
-    # Остановить таск при отключении клиента
-    engagement_task.cancel()
+        # Загрузка обработчиков
+        setup_handlers(client, channels)
+        logger.info("Авторизация в аккаунт")
+        await client.start(password=config.telethon_client.password)
+        logger.info("Авторизация успешна")
+        logger.info("Парсер новостных каналов успешно запущен")
+        # Запуск таска обновления просмотров
+        engagement_task = asyncio.create_task(update_engagement_for_active_cluster_posts(client))
 
+        try:
+            # Просто ждем отключения
+            await client.disconnected
+        finally:
+            engagement_task.cancel()
+            try:
+                await engagement_task
+            except asyncio.CancelledError:
+                pass
 
+# TODO: Что то намудренное с перезапусками, скорее всего нужно удалить/изменить
 async def start_aiogram():
     # Создание бота, диспетчера и клиента
     dp.include_router(user_handlers.router)
-    # Удаление вебхука с ретраями, чтобы сетевые сбои не валили запуск
+    # Удаление вебхука с перезапусками, чтобы сетевые сбои не валили запуск
     import asyncio as _asyncio
     from aiogram.exceptions import TelegramNetworkError as _TgNetErr
     for attempt in range(5):
@@ -89,7 +96,7 @@ async def main():
     await asyncio.gather(telethon_task, aiogram_task, publisher, reputation)
 
 
-# TODO: Надо расстащить куски аиограм и телетон в два модуля оставив тут мейн
+# TODO: Надо растащить куски aiogram и telethon в два модуля оставив тут main
 if __name__ == '__main__':
     # Подключаем словарь конфигурации логирования
     with open('config/logs_settings.yaml', 'rt') as f:

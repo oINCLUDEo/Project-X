@@ -6,11 +6,10 @@ import os
 
 logger = logging.getLogger(__name__)
 
-async def default_handler(event, bot):
+async def default_handler(event):
     if event.grouped_id:
         return
     logger.info("Получено новое сообщение")
-    filename = ""
     media_urls = []
     message_text = event.message.text or ""
 
