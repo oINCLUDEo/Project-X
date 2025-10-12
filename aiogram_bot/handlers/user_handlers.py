@@ -1,10 +1,11 @@
 import logging
 
+from aiogram_bot.keyboards import get_main_menu_keyboard, get_onboarding_keyboard
 from database.db_connection import add_user, insert_ad_label, record_user_feedback, \
     get_cluster_posts_full, get_cluster_metadata, \
     get_channel_tg_id_for_post, get_post_content_by_id, get_engagement_score_score_by_post_id, \
     get_cluster_id_by_post, get_channel_reputation_by_post_id, get_ad_label_for_post, \
-    get_recent_ad_decisions, get_system_param, get_generated_articles_by_date
+    get_recent_ad_decisions, get_system_param, get_generated_articles_by_date, user_exists
 from helpers.html_utils import fix_html_tags
 from datetime import timedelta
 from aiogram import Router, Dispatcher
@@ -19,11 +20,20 @@ logger = logging.getLogger(__name__) # Создание логгера под ф
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     user_tg_id : int = message.from_user.id
-    username : str = message.from_user.username
-    first_name : str = message.from_user.first_name
-    full_name : str = message.from_user.full_name
-    logger.debug("Запрос на добавление пользователя - ", user_tg_id, full_name)
-    add_user(user_tg_id, username, first_name, full_name)
+    first_name: str = message.from_user.first_name
+
+    if user_exists(user_tg_id):
+        logger.info(f"[BOT] Использование команды /start зарегистрированного пользователя - {str(user_tg_id)}")
+
+        welcome_text = f"""{first_name}! 😊\nРад вас снова видеть! Чем могу помочь сегодня?"""
+        await message.answer(welcome_text, reply_markup=get_main_menu_keyboard())
+    else:
+        username : str = message.from_user.username
+        full_name : str = message.from_user.full_name
+
+        logger.info(f"[BOT] Запрос на добавление пользователя - {str(user_tg_id)}, {full_name}")
+        add_user(user_tg_id, username, first_name, full_name)
+        await show_welcome_and_onboarding(message)
 
 
 @router.callback_query(lambda c: c.data.startswith(('like_', 'dislike_')))
@@ -208,3 +218,63 @@ async def cmd_info(message: Message):
         await message.reply(reply_text, parse_mode='HTML')
     except Exception as e:
         logger.error("Ошибка получения информации о посте: %s", str(e))
+
+
+async def show_welcome_and_onboarding(message: Message):
+    """Отображает приветственное сообщение и начинает процесс регистрации"""
+    welcome_text = (
+        "🎉 <b>Добро пожаловать в наш новостной агрегатор!</b>\n\n"
+        "Я помогу вам получать самые актуальные и интересные новости, "
+        "собранные из множества источников и обработанные с помощью ИИ.\n\n"
+        "📱 <b>Что я умею:</b>\n"
+        "• Собираю похожие новости в кластеры\n"
+        "• Создаю уникальные сводки на основе нескольких источников\n"
+        "• Фильтрую рекламу и спам\n"
+        "• Адаптирую контент под ваши интересы\n\n"
+    )
+
+    # if referral_code:
+    #     welcome_text += f"👥 Вы пришли по реферальной ссылке от друга!\n\n"
+
+    welcome_text += "Готовы начать?"
+
+    await message.answer(welcome_text, parse_mode='HTML', reply_markup=get_onboarding_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "onboarding_how_it_works")
+async def handle_how_it_works(callback_query: CallbackQuery):
+    """Объясняет, как устроена система"""
+    explanation_text = (
+        "🔍 <b>Как работает наш агрегатор:</b>\n\n"
+        "1️⃣ <b>Сбор новостей</b>\n"
+        "Мы отслеживаем десятки новостных каналов и собираем свежие посты\n\n"
+        "2️⃣ <b>ИИ-анализ</b>\n"
+        "Наш искусственный интеллект анализирует содержание и группирует похожие новости\n\n"
+        "3️⃣ <b>Синтез</b>\n"
+        "Создаем уникальные сводки, объединяя информацию из разных источников\n\n"
+        "4️⃣ <b>Персонализация</b>\n"
+        "Показываем вам только то, что действительно интересно\n\n"
+        "🚫 <b>Фильтрация</b>\n"
+        "Автоматически отсеиваем рекламу и спам\n\n"
+        "Готовы начать?"
+    )
+
+    await callback_query.message.edit_text(
+        explanation_text,
+        parse_mode='HTML',
+        reply_markup=get_onboarding_keyboard()
+    )
+
+
+@router.callback_query(lambda c: c.data == "onboarding_complete")
+async def handle_onboarding_complete(callback_query: CallbackQuery):
+    """Завершить процесс регистрации"""
+    await callback_query.message.edit_text(
+        "🎉 <b>Отлично! Вы готовы к использованию!</b>\n\n"
+        "Теперь вы будете получать персонализированные новости. "
+        "Используйте кнопки ниже для навигации.",
+        parse_mode='HTML'
+    )
+    await callback_query.message.edit_reply_markup(
+        reply_markup=get_main_menu_keyboard()
+    )

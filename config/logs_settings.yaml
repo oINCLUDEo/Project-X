@@ -25,8 +25,8 @@ handlers:
 
 loggers:
   aiogram_bot:
-    level: INFO
-    handlers: [file]
+    level: DEBUG
+    handlers: [file, default]
     propagate: false
 
   telethon_client:

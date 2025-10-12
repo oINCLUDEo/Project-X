@@ -19,7 +19,7 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores',
            'record_user_feedback', 'get_cluster_posts_full',
            'put_generated_article', 'get_generated_article_cluster_id_by_text_prefix',
-           'get_generated_articles_by_date', 'get_active_clusters']
+           'get_generated_articles_by_date', 'get_active_clusters', 'user_exists']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -123,23 +123,27 @@ def add_user(user_tg_id, username, first_name, full_name):
             with conn.cursor() as cur:
                 cur.execute(query, (user_tg_id, username, first_name, full_name,))
 
-        logger.info("Пользователь успешно добавлен!")
+        logger.info("[DB] Пользователь успешно добавлен!")
     except psycopg2.IntegrityError:
-        logger.exception("Ошибка уникальности:")
+        logger.exception("[DB] Ошибка уникальности:")
 
 
-def _get_or_create_user_id(user_tg_id: int) -> int:
-    """Возвращает user_id по Telegram ID, создаёт пользователя при необходимости."""
-    select_q = "SELECT user_id FROM users WHERE user_tg_id = %s;"
-    insert_q = "INSERT INTO users(user_tg_id) VALUES (%s) RETURNING user_id;"
+def get_user_id(user_tg_id: int) -> int:
+    """Возвращает user_id по Telegram ID или None если пользователь не найден."""
+    query = "SELECT user_id FROM users WHERE user_tg_id = %s;"
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(select_q, (user_tg_id,))
-            row = cur.fetchone()
-            if row:
-                return row[0]
-            cur.execute(insert_q, (user_tg_id,))
+            cur.execute(query, (user_tg_id,))
             return cur.fetchone()[0]
+
+
+def user_exists(user_tg_id: int) -> bool:
+    """Проверяет существует ли пользователь."""
+    query = "SELECT user_id FROM users WHERE user_tg_id = %s LIMIT 1;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (user_tg_id,))
+            return cur.fetchone() is not None
 
 
 def record_user_feedback(user_tg_id: int, post_id: int, action: str) -> None:
@@ -149,7 +153,7 @@ def record_user_feedback(user_tg_id: int, post_id: int, action: str) -> None:
     - like: is_liked=True, is_hidden=False
     - dislike: is_liked=False, is_hidden=True
     """
-    user_id = _get_or_create_user_id(user_tg_id)
+    user_id = get_user_id(user_tg_id)
     is_liked = True if action == 'like' else False
     is_hidden = False if action == 'like' else True
     upsert_q = """
