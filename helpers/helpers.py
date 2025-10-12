@@ -50,7 +50,6 @@ def compute_cluster_score(cluster_posts: List[Dict], a=1, b=1.5, c=2, alpha=1,
     total_comments = sum(p['comments'] for p in cluster_posts)
     total_forwards = sum(p['forwards'] for p in cluster_posts)
     unique_channels = len(set(p['channel_id'] for p in cluster_posts))
-    avg_rep = None
     reps = [p.get('channel_reputation') for p in cluster_posts if p.get('channel_reputation') is not None]
     if reps:
         avg_rep = sum(reps) / len(reps)

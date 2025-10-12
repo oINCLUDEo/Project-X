@@ -3,11 +3,16 @@ import logging
 from typing import List, Dict, Tuple
 import re
 import time
+from helpers.html_utils import normalize_html_for_telegram
+
+logger = logging.getLogger(__name__)
+
 
 try:
     # OpenAI SDK v1.x
     from openai import OpenAI  # type: ignore
-except Exception:  # pragma: no cover
+except Exception as import_err:  # pragma: no cover
+    logger.warning(f"[IMPORT] OpenAI SDK не доступна: {import_err}")
     OpenAI = None  # type: ignore
 
 from helpers.helpers import compute_heat_score
@@ -44,7 +49,8 @@ def _select_anchor_post(cluster_posts: List[Dict]) -> Dict:
                 p.get('comments', 0),
                 p.get('forwards', 0),
             )
-        except Exception:
+        except Exception as heat_err:
+            logger.warning(f"[HEAT] Ошибка вычисления heat score для поста: {heat_err}")
             heat = 0.0
         length_bonus = min(1.0, len((p.get('content') or '').strip()) / 1000.0)
         score = 0.7 * heat + 0.3 * length_bonus
@@ -70,21 +76,25 @@ def _get_style_prefs() -> Dict:
     """
     try:
         style = get_system_param('content_style', 'auto')
-    except Exception:
+    except Exception as style_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_style: {style_err}")
         style = 'auto'
     try:
         tone = get_system_param('content_tone', 'neutral')
-    except Exception:
+    except Exception as tone_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_tone: {tone_err}")
         tone = 'neutral'
     try:
         headings = get_system_param('content_headings_enabled', '0')
-    except Exception:
+    except Exception as headings_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_headings_enabled: {headings_err}")
         headings = False
     try:
         emojis_max = int(get_system_param('content_emojis_max', '1'))
         if emojis_max < 0:
             emojis_max = 0
-    except Exception:
+    except Exception as emojis_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_emojis_max: {emojis_err}")
         emojis_max = 1
     return {
         'style': style,         # auto|news|entertainment
@@ -109,19 +119,23 @@ def _get_length_prefs() -> Dict:
     """
     try:
         mode = (get_system_param('content_len_mode', 'auto') or 'auto').lower()  # auto|short|long
-    except Exception:
+    except Exception as mode_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_len_mode: {mode_err}")
         mode = 'auto'
     try:
         min_p = max(1, int(get_system_param('content_min_paragraphs', '1') or '1'))
-    except Exception:
+    except Exception as min_p_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_min_paragraphs: {min_p_err}")
         min_p = 1
     try:
         max_p = max(min_p, int(get_system_param('content_max_paragraphs', '6') or '6'))
-    except Exception:
+    except Exception as max_p_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_max_paragraphs: {max_p_err}")
         max_p = 6
     try:
         allow_headline_only = (get_system_param('content_allow_headline_only', '1') or '1')
-    except Exception:
+    except Exception as headline_err:
+        logger.warning(f"[CONFIG] Ошибка получения параметра content_allow_headline_only: {headline_err}")
         allow_headline_only = True
     return {
         'mode': mode,
@@ -147,7 +161,7 @@ def _text_to_shingles(text: str, k: int = 5) -> set:
     """
     tokens = re.findall(r"\w+", (text or '').lower(), flags=re.UNICODE)
     if len(tokens) < k:
-        return set([" ".join(tokens)]) if tokens else set()
+        return {" ".join(tokens)} if tokens else set()
     return set(" ".join(tokens[i:i+k]) for i in range(len(tokens)-k+1))
 
 
@@ -201,7 +215,7 @@ def _compute_avg_var_len(posts: List[Dict]) -> Tuple[float, float, int]:
     return float(avg), float(var), n
 
 
-def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, novelty: float, style: str, tone: str) -> Tuple[int, int]:
+def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, novelty: float, style: str) -> Tuple[int, int]:
     """
     Вычисляет оптимальное количество абзацев для генерируемого текста на основе метрик контента.
     
@@ -217,17 +231,15 @@ def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, nove
         var_len: Дисперсия длин постов
         novelty: Метрика новизны фактов (0..1)
         style: Стиль контента (auto|news|entertainment)
-        tone: Тон контента (neutral|lively)
-        
+
     Returns:
         Tuple[int, int]: (минимальное количество абзацев, максимальное количество абзацев)
     """
     lp = _get_length_prefs()
     
     # Telegram лимиты
-    TELEGRAM_CAPTION_LIMIT = 1024  # Лимит подписи для медиа
-    TELEGRAM_MESSAGE_LIMIT = 4096  # Лимит обычного сообщения
-    
+    telegram_caption_limit = 1024  # Лимит подписи для медиа
+
     # База по среднему размеру
     if lp['mode'] == 'short':
         base_min, base_max = max(1, lp['min_p']), max(1, min(2, lp['max_p']))
@@ -255,11 +267,10 @@ def _compute_target_paragraphs_from_metrics(avg_len: float, var_len: float, nove
     if style == 'entertainment':
         max_p = max(min_p, min(max_p, 3))
     
-    # Ограничения по длине для Telegram
+    # Ограничения по длине для Telegram.
     # Предполагаем ~200-300 символов на абзац для ограничения общей длины
     estimated_chars_per_paragraph = 250
-    max_paragraphs_by_caption = TELEGRAM_CAPTION_LIMIT // estimated_chars_per_paragraph
-    max_paragraphs_by_message = TELEGRAM_MESSAGE_LIMIT // estimated_chars_per_paragraph
+    max_paragraphs_by_caption = telegram_caption_limit // estimated_chars_per_paragraph
     
     # Ограничиваем максимальное количество абзацев лимитами Telegram
     max_p = min(max_p, max_paragraphs_by_caption)
@@ -367,7 +378,7 @@ def _build_prompt_mode_a(anchor: Dict, others: List[Dict], has_media: bool = Fal
     avg_len, var_len, _ = _compute_avg_var_len(posts_for_metrics)
     novelty = _compute_novelty_score(posts_for_metrics)
     prefs = _get_style_prefs()
-    min_p, max_p = _compute_target_paragraphs_from_metrics(avg_len, var_len, novelty, prefs['style'], prefs['tone'])
+    min_p, max_p = _compute_target_paragraphs_from_metrics(avg_len, var_len, novelty, prefs['style'])
     len_hint = f"Сделай {min_p}–{max_p} абзацев." if min_p != max_p else f"Сделай {min_p} абзац(а)."
 
     user = (
@@ -425,7 +436,7 @@ def _build_prompt_mode_b(posts: List[Dict], has_media: bool = False) -> Tuple[st
     avg_len, var_len, _ = _compute_avg_var_len(posts)
     novelty = _compute_novelty_score(posts)
     prefs = _get_style_prefs()
-    min_p, max_p = _compute_target_paragraphs_from_metrics(avg_len, var_len, novelty, prefs['style'], prefs['tone'])
+    min_p, max_p = _compute_target_paragraphs_from_metrics(avg_len, var_len, novelty, prefs['style'])
     lp = _get_length_prefs()
     if lp['allow_headline_only'] and min_p == 1:
         headline_hint = "Разрешено: жирный лид и один короткий абзац. "
@@ -526,7 +537,7 @@ def _llm_generate(system: str, user: str, model: str | None = None, max_output_t
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or OpenAI is None:
-        logger.warning("[SYNTH] OpenAI API key missing or SDK not available — using fallback")
+        logger.warning("[LLM] OpenAI API ключ отсутствует или SDK недоступен — используем fallback")
         return None, None
     try:
         base_url = os.getenv("OPENAI_BASE_URL")
@@ -548,7 +559,7 @@ def _llm_generate(system: str, user: str, model: str | None = None, max_output_t
         backoff_s = 1.0
         for idx, used_model in enumerate(candidates):
             try:
-                logger.info(f"[SYNTH] LLM try {idx+1}/{len(candidates)} model={used_model}")
+                logger.info(f"[LLM] Попытка {idx+1}/{len(candidates)} модель={used_model}")
                 resp = client.chat.completions.create(
                     model=used_model,
                     temperature=0.2,
@@ -561,14 +572,14 @@ def _llm_generate(system: str, user: str, model: str | None = None, max_output_t
                 return (resp.choices[0].message.content or "").strip(), used_model
             except Exception as e1:
                 if _is_ratelimit_error(e1) and (idx + 1) < len(candidates):
-                    logger.warning(f"[SYNTH] Rate-limited on model={used_model}, will try next after {backoff_s:.1f}s")
+                    logger.warning(f"[LLM] Превышен лимит запросов для модели={used_model}, попробуем следующую через {backoff_s:.1f}с")
                     time.sleep(backoff_s)
                     backoff_s = min(backoff_s * 2.0, 6.0)
                     continue
-                logger.error(f"[SYNTH] Model {used_model} failed: {e1}")
+                logger.error(f"[LLM] Модель {used_model} не удалась: {e1}")
                 continue
-    except Exception as e:
-        logger.error(f"[SYNTH] OpenAI call failed: {e}", exc_info=True)
+    except Exception as llm_err:
+        logger.error(f"[LLM] Вызов OpenAI не удался: {llm_err}", exc_info=True)
         return None, None
 
 
@@ -584,8 +595,8 @@ def _split_sentences(text: str) -> List[str]:
     """
     if not text:
         return []
-    # Простая эвристика: разбиваем по . ! ? с возможными пробелами и кавычками
-    parts = re.split(r"(?<=[\.!?;])\s+", text.strip())
+    # Простая эвристика: разбиваем по <. ! ?> с возможными пробелами и кавычками
+    parts = re.split(r"(?<=[.!?;])\s+", text.strip())
     return [p.strip() for p in parts if p and len(p.strip()) > 0]
 
 
@@ -624,12 +635,12 @@ def synthesize_news(cluster_posts: List[Dict], mode: str = 'A', has_media: bool 
     """
     # Валидация входных данных
     if not cluster_posts:
-        logger.warning("[SYNTH] Empty cluster_posts")
+        logger.warning("[SYNTH] Пустой cluster_posts")
         return "", {"mode": mode, "posts": 0, "model": "none", "prompt_len": 0, "has_media": has_media}
     
     # Валидация режима
     if mode.upper() not in ['A', 'B']:
-        logger.error(f"[SYNTH] Invalid mode '{mode}', using 'A' as default")
+        logger.error(f"[SYNTH] Неверный режим '{mode}', используем 'A' по умолчанию")
         mode = 'A'
     
     # Определяем наличие медиа в кластере, если не передано явно
@@ -660,125 +671,10 @@ def synthesize_news(cluster_posts: List[Dict], mode: str = 'A', has_media: bool 
     # Генерация текста через LLM
     text, model_used = _llm_generate(system, user)
     if not text:
-        # Фолбэк без LLM
-        logger.warning("[SYNTH] LLM generation failed, using fallback")
+        # Fallback без LLM
+        logger.warning("[SYNTH] Генерация LLM не удалась, используем fallback")
         # TODO: Нужно реализовать метод, чтобы при подобных ошибках администраторы оперативно получали информацию об этом
 
     # Нормализация выхода
-    normalized = _normalize_output(text, has_media)
+    normalized = normalize_html_for_telegram(text, has_media)
     return normalized, {"mode": mode, "posts": len(cluster_posts), "model": model_used, "prompt_len": len(user), "has_media": has_media}
-
-
-def _normalize_output(text: str, has_media: bool = False) -> str:
-    """
-    Пост-обработка вывода LLM для совместимости с Telegram HTML.
-    
-    Выполняет:
-    1. Удаление внутренних ссылок на источники
-    2. Удаление markdown разметки
-    3. Схлопывание лишних пустых строк
-    4. Автоматическое выделение первой строки жирным
-    5. Фильтрацию HTML тегов (только разрешенные для Telegram)
-    6. Нормализацию синонимичных тегов (strong->b, em->i)
-    7. Сохранение блока источников в конце
-    8. Обрезку текста до лимита Telegram (1024 символа)
-    
-    Args:
-        text: Исходный текст от LLM
-        
-    Returns:
-        str: Нормализованный HTML текст для Telegram
-    """
-    if not text:
-        return text
-    lines = [l.rstrip() for l in text.splitlines()]
-    cleaned: List[str] = []
-    sources_block: List[str] = []
-    in_sources = False
-    for l in lines:
-        low = l.strip().lower()
-        if low.startswith('источники:'):
-            in_sources = True
-            sources_block.append(l)
-            continue
-        if in_sources:
-            # часть списка источников — сохраняем как есть
-            sources_block.append(l)
-            continue
-        # удаляем строки начинающиеся на "Источник ", markdown-маркеры и явные заголовки
-        if re.match(r'^\s*источник\b', low, flags=re.IGNORECASE):
-            continue
-        if re.match(r'^\s*(лид|детали|что известно/что не подтверждено)\s*:?', low, flags=re.IGNORECASE):
-            continue
-        if low.startswith('- ') or low.startswith('* '):
-            # заменим markdown-список на простой текст с переносом строки
-            cleaned.append(l[2:].strip())
-            continue
-        cleaned.append(l)
-    # схлопываем лишние пустые строки
-    tmp: List[str] = []
-    prev_empty = False
-    for l in cleaned:
-        is_empty = len(l.strip()) == 0
-        if is_empty and prev_empty:
-            continue
-        tmp.append(l)
-        prev_empty = is_empty
-    cleaned = tmp
-    # удаляем лишние пустые строки в конце
-    while cleaned and not cleaned[-1].strip():
-        cleaned.pop()
-
-    # Автоматически подчёркиваем первую строку (если нет HTML-тегов и она короткая)
-    if cleaned:
-        first = cleaned[0]
-        if ('<' not in first and '>' not in first) and 5 <= len(first) <= 140:
-            cleaned[0] = f"<b>{first}</b>"
-
-    body = "\n".join(cleaned).strip()
-
-    # Жёсткая фильтрация HTML: всегда extended whitelist
-    def _strict_filter(html: str) -> str:
-        # normalize synonyms
-        html = re.sub(r"</?strong>", lambda m: "</b>" if m.group(0).startswith("</") else "<b>", html, flags=re.IGNORECASE)
-        html = re.sub(r"</?em>",     lambda m: "</i>" if m.group(0).startswith("</") else "<i>", html, flags=re.IGNORECASE)
-        html = re.sub(r"</?ins>",    lambda m: "</u>" if m.group(0).startswith("</") else "<u>", html, flags=re.IGNORECASE)
-        html = re.sub(r"</?(strike|del)>", lambda m: "</s>" if m.group(0).startswith("</") else "<s>", html, flags=re.IGNORECASE)
-        # always remove <p> and <br>
-        html = re.sub(r"<\s*/?\s*p\s*>", "", html, flags=re.IGNORECASE)
-        html = re.sub(r"<\s*/?\s*br\s*/?>", "", html, flags=re.IGNORECASE)
-        # allow b,i,u,s,a,code,pre,blockquote,tg-spoiler/span.tg-spoiler
-        # Strip attributes except href on <a>
-        # 1) sanitize <a>: keep only href
-        html = re.sub(r"<a\s+[^>]*href=\"([^\"]+)\"[^>]*>", r"<a href=\"\1\">", html, flags=re.IGNORECASE)
-        # 2) keep closing tags
-        html = re.sub(r"</\s*(b|i|u|s|code|pre|blockquote|a|tg-spoiler)\s*>", r"</\1>", html, flags=re.IGNORECASE)
-        # 3) keep opening tags (no attrs), special-case span.tg-spoiler -> <tg-spoiler>
-        html = re.sub(r"<\s*span\s+class=\"tg-spoiler\"\s*>", "<tg-spoiler>", html, flags=re.IGNORECASE)
-        html = re.sub(r"<\s*(b|i|u|s|code|pre|blockquote|a|tg-spoiler)\s*>", r"<\1>", html, flags=re.IGNORECASE)
-        # finally remove any other tag
-        html = re.sub(r"<\s*(?!/?(?:b|i|u|s|code|pre|blockquote|a|tg-spoiler)\b)[^>]*>", "", html, flags=re.IGNORECASE)
-        return html
-
-    body = _strict_filter(body)
-
-    tail = "\n".join(sources_block).strip()
-    if tail:
-        full_text = (body + "\n\n" + tail).strip()
-    else:
-        full_text = body
-    
-    # Обрезка до лимита Telegram в зависимости от наличия медиа
-    char_limit = 1024 if has_media else 4096
-    if len(full_text) > char_limit:
-        # Обрезаем до лимита, стараясь не разрывать слова
-        truncated = full_text[:char_limit]
-        last_space = truncated.rfind(' ')
-        if last_space > char_limit * 0.8:  # Если нашли пробел в разумных пределах
-            truncated = truncated[:last_space]
-        full_text = truncated + "..."
-        logger.warning(f"[SYNTH] Text truncated to {len(full_text)} chars (limit: {char_limit}, has_media: {has_media})")
-    
-    return full_text
-
-

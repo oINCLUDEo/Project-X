@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -7,8 +8,8 @@ import os
 from database.db_connection import upsert_model_version
 from sklearn.metrics.pairwise import cosine_similarity
 
-# classifier = pipeline("zero-shot-classification", model="joeddav/xlm-roberta-large-xnli")
-# embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+logger = logging.getLogger(__name__)
+
 embedding_model = SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
 
 # Легкая классификационная модель для рекламы (можно заменить на вашу)
@@ -20,10 +21,11 @@ try:
     )
     ad_model.eval()
     AD_MODEL_VERSION = _AD_MODEL_NAME
-except Exception:
+except Exception as e:
     ad_tokenizer = None
     ad_model = None
     AD_MODEL_VERSION = "none"
+    logger.error(f"[AI] Ошибка загрузки модели для идентификации рекламы {_AD_MODEL_NAME}: {e}")
 
 # Альтернативная лёгкая модель (TF-IDF + LR), загружаемая из файла
 _CLASSIC_MODEL_PATH = os.getenv('AD_CLASSIC_MODEL_PATH', 'models/ad_classifier.pkl')
@@ -32,14 +34,17 @@ if os.path.exists(_CLASSIC_MODEL_PATH):
     try:
         classic_model = joblib.load(_CLASSIC_MODEL_PATH)
         upsert_model_version('ad_classifier', 'classic_file')
-    except Exception:
+        logger.info(f"Классическая модель успешно загружена из {_CLASSIC_MODEL_PATH}")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки классической модели: {e}")
         classic_model = None
+
 
 def get_embedding(text: str) -> list[float]:
     """
     Генерирует эмбеддинг для переданного текста.
     """
-    return embedding_model.encode([text])[0]
+    return embedding_model.encode([text])[0].tolist()
 
 
 def get_similarity(emb1: list[float], emb2: list[float]) -> float:
@@ -64,7 +69,8 @@ def predict_ad_probability(text: str) -> float:
             try:
                 prob = float(classic_model.predict_proba([text])[0][1])
                 return prob
-            except Exception:
+            except Exception as predict_error:
+                logger.warning(f"Ошибка предсказания классической модели: {predict_error}")
                 return 0.0
         return 0.0
     with torch.no_grad():

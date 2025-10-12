@@ -6,7 +6,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-async def album_handler(event, bot):
+async def album_handler(event):
     logger.info("Получен альбом из канала")
     media_urls = []
     message_text = event.text or ""
@@ -30,7 +30,8 @@ async def album_handler(event, bot):
             cap = (getattr(file, 'message', None) or getattr(file, 'text', None) or "").strip()
             if cap:
                 captions.append(cap)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ошибка получения подписи: {e}")
             pass
 
     # Если общий текст альбома пустой, используем объединённые подписи элементов
@@ -45,11 +46,11 @@ async def album_handler(event, bot):
                     unique_caps.append(c)
             message_text = "\n".join(unique_caps)
         else:
-            # Фолбэк: краткое описание альбома
+            # Fallback: краткое описание альбома
             message_text = f"Альбом: {len(media_urls)} файл(ов)"
 
     try:
         process_ai_and_clustering(msg_from_channel_id, message_text, media_urls)
         pass
     except Exception as e:
-        logger.error("Ошибка обработки альбома: %s", str(e))
+        logger.error(f"Ошибка обработки альбома: {e}")

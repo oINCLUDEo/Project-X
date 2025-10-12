@@ -3,17 +3,16 @@ import time
 import asyncio
 import datetime
 from telethon import utils
-from database.db_connection import get_channel_category, get_category_users, add_post, get_expired_clusters, \
+from database.db_connection import get_channel_category, get_category_users, add_post, \
     get_main_post_for_cluster, get_active_clusters, get_posts_by_cluster, archive_cluster, get_posts_in_active_clusters, \
-    update_post_status, get_cluster_id_by_post, update_cluster_status, \
     get_posts_by_cluster_with_reputation, log_cluster_score, get_system_param, recalc_channel_reputation, \
-    get_cluster_metadata, get_latest_cluster_scores, get_recent_clusters, get_cluster_posts_full, put_generated_article
+    get_cluster_metadata, get_latest_cluster_scores, get_cluster_posts_full, put_generated_article
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram import types
 from aiogram.enums import ParseMode
 from aiogram_bot.keyboards import get_feedback_keyboard
 
-from helpers.ad_helper import compute_ad_score, process_post_for_ad_check
+from helpers.ad_helper import process_post_for_ad_check
 from AI.Ai_Functions import predict_ad_probability, get_embedding
 from AI.clustering import process_post_and_cluster
 from helpers.helpers import compute_cluster_score, get_users_for_post
@@ -33,7 +32,7 @@ def get_media_type_by_path(path: str) -> str:
     else:
         return "unknown"
 
-async def send_to_users(bot, users, send_func, *args, **kwargs):
+async def send_to_users(users, send_func, *args, **kwargs):
     """Отправляет сообщение всем пользователям. Возвращает True если все отправки успешны."""
     success_count = 0
     total_users = len(users)
@@ -49,8 +48,8 @@ async def send_to_users(bot, users, send_func, *args, **kwargs):
     # Возвращаем True только если отправлено всем пользователям
     return success_count == total_users
 
-def validate_post(event, type):
-    if type == "album":
+def validate_post(event, post_type):
+    if post_type == "album":
         msg_from_channel_id = event.messages[0].peer_id.channel_id
     else:
         msg_from_channel_id = event.peer_id.channel_id
@@ -67,9 +66,9 @@ def validate_post(event, type):
 
 def process_ai_and_clustering(msg_from_channel_id, message_text, media_urls=None, message_id=None):
     safe_text = message_text or ""
-    embedding = get_embedding(safe_text).tolist()
+    embedding = get_embedding(safe_text)
     post_id = add_post(msg_from_channel_id, safe_text, embedding, media_urls, message_id=message_id)
-    clustering_result = process_post_and_cluster(msg_from_channel_id, embedding, post_id)
+    clustering_result = process_post_and_cluster(embedding, post_id)
     logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})")
     # Немедленный запуск фильтра рекламы на свежем посте (опционально)
     try:
@@ -86,7 +85,7 @@ def _sanitize_caption(text: str) -> str:
     try:
         import re
         
-        # Логируем исходный текст для диагностики
+        # Логгируем исходный текст для диагностики
         logger.debug(f"[SANITIZE] Input text (first 200 chars): {text[:200].encode('ascii', 'ignore').decode('ascii')}...")
         
         # Разбиваем на строки
@@ -100,7 +99,7 @@ def _sanitize_caption(text: str) -> str:
                 if re.search(r'<a\s+href=', line):
                     continue
                 # Если строка содержит только эмодзи и рекламные слова, пропускаем
-                if re.match(r'^[^\w]*?(подписывайся|подписаться|присылай|новости|инсайд)[^\w]*$', line, re.IGNORECASE):
+                if re.match(r'^\W*?(подписывайся|подписаться|присылай|новости|инсайд)\W*$', line, re.IGNORECASE):
                     continue
                 filtered_lines.append(line)
             
@@ -121,7 +120,7 @@ def _sanitize_caption(text: str) -> str:
 
 async def publish_main_post(bot, users, post_row):
     """Публикует главный пост. Возвращает True если отправка успешна всем пользователям."""
-    # Сначала санитизируем основной контент
+    # Сначала очищаем основной контент
     content = _sanitize_caption(post_row[2])
     
     # Затем добавляем рекламу, если она есть
@@ -154,13 +153,13 @@ async def publish_main_post(bot, users, post_row):
         built = media_group.build()
         if len(built) > 10:
             built = built[:10]
-        return await send_to_users(bot, users, bot.send_media_group, media=built)
+        return await send_to_users(users, bot.send_media_group, media=built)
     elif len(media_urls) == 1:
         url = media_urls[0]
         mtype = get_media_type_by_path(url)
         if mtype == 'video':
             return await send_to_users(
-                bot, users, bot.send_video,
+                users, bot.send_video,
                 video=types.FSInputFile(path=url),
                 caption=content,
                 parse_mode=ParseMode.HTML,
@@ -168,7 +167,7 @@ async def publish_main_post(bot, users, post_row):
             )
         elif mtype == 'image':
             return await send_to_users(
-                bot, users, bot.send_photo,
+                users, bot.send_photo,
                 photo=types.FSInputFile(path=url),
                 caption=content,
                 parse_mode=ParseMode.HTML,
@@ -176,7 +175,7 @@ async def publish_main_post(bot, users, post_row):
             )
         elif mtype == 'gif':
             return await send_to_users(
-                bot, users, bot.send_animation,
+                users, bot.send_animation,
                 animation=types.FSInputFile(path=url),
                 caption=content,
                 parse_mode=ParseMode.HTML,
@@ -184,7 +183,7 @@ async def publish_main_post(bot, users, post_row):
             )
         else:
             return await send_to_users(
-                bot, users, bot.send_message,
+                users, bot.send_message,
                 text=content,
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_feedback_keyboard(post_row[0])
@@ -192,7 +191,7 @@ async def publish_main_post(bot, users, post_row):
     else:
         # Только текст
         return await send_to_users(
-            bot, users, bot.send_message,
+            users, bot.send_message,
             text=content,
             parse_mode=ParseMode.HTML,
             reply_markup=get_feedback_keyboard(post_row[0])
@@ -204,8 +203,6 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
     Периодически проверяет engagement кластеров и публикует, если score >= min_score.
 
     :param bot: объект бота
-    :param get_posts_by_cluster: функция, возвращающая список постов кластера по cluster_id
-    :param get_users_for_post: функция, возвращающая список пользователей для поста
     :param interval: интервал проверки в секундах
     :param min_score: минимальное значение score для публикации
     """
@@ -234,7 +231,8 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
             algo = (get_system_param('cluster_scoring_algo', 'improved') or 'improved').lower()
             try:
                 min_score_param = float(get_system_param('cluster_min_score', str(min_score)) or min_score)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[PUBLISH] Ошибка получения cluster_min_score: {e}")
                 min_score_param = min_score
             score_to_use = improved_score if algo == 'improved' else baseline_score
             # Ужесточаем базовый порог
@@ -243,11 +241,13 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
             # Гибкая задержка публикации: учитываем относительность в сравнении с другими кластерами в окне времени
             try:
                 min_age_minutes = int(get_system_param('cluster_min_age_minutes', '10') or '10')
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[PUBLISH] Ошибка получения cluster_min_age_minutes: {e}")
                 min_age_minutes = 10
             try:
                 min_posts_in_cluster = int(get_system_param('cluster_min_posts', '3') or '3')
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[PUBLISH] Ошибка получения cluster_min_posts: {e}")
                 min_posts_in_cluster = 3
 
             meta = get_cluster_metadata(cluster_id) or {}
@@ -258,21 +258,24 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                     age_minutes = (datetime.datetime.now() - created_at).total_seconds() / 60.0
                     meets_age = age_minutes >= min_age_minutes
                     logger.debug(f"[PUBLISH] Кластер {cluster_id}: age_minutes={age_minutes:.1f}, min_age={min_age_minutes}")
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[PUBLISH] Ошибка вычисления возраста кластера {cluster_id}: {e}")
                 meets_age = False
             meets_volume = (meta.get('post_count') or 0) >= min_posts_in_cluster
             logger.debug(f"[PUBLISH] Кластер {cluster_id}: created_at={meta.get('created_at')}, age_ok={meets_age} (min_age={min_age_minutes}m), volume_ok={meets_volume} (count={meta.get('post_count')}, min={min_posts_in_cluster})")
 
-            # Дополнительно: динамический «перцентильный» фильтр по скору в окне времени
+            # Дополнительно: динамический «перцентильный» фильтр по скору в окне времени.
             # Публикуем только кластеры из топ-квантили (например, 70-й перцентиль) текущего окна
             try:
                 percentile_str = get_system_param('cluster_min_percentile', '0.7') or '0.7'
                 min_percentile = max(0.5, min(0.95, float(percentile_str)))
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[PUBLISH] Ошибка получения cluster_min_percentile: {e}")
                 min_percentile = 0.7
             try:
                 window_minutes = int(get_system_param('cluster_percentile_window_minutes', '120') or '120')
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[PUBLISH] Ошибка получения cluster_percentile_window_minutes: {e}")
                 window_minutes = 120
             # Получаем свежие скоринги по выбранному алгоритму
             recent_scores = get_latest_cluster_scores(algo, window_minutes)
@@ -288,7 +291,8 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
             # Опциональный обход возрастного порога при очень высоком score (включается системным параметром)
             try:
                 bypass_margin = float(get_system_param('cluster_age_bypass_margin', '0') or '0')
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[PUBLISH] Ошибка получения cluster_age_bypass_margin: {e}")
                 bypass_margin = 0.0
             bypass_age = (bypass_margin > 0) and (score_to_use >= (dynamic_cutoff + bypass_margin)) and meets_volume
 
@@ -306,7 +310,8 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                 try:
                     gen_enabled_raw = (get_system_param('content_generation_enabled', '1') or '1').lower()
                     gen_enabled = gen_enabled_raw in ('1', 'true', 'yes', 'on')
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"[CONTENT] Ошибка получения content_generation_enabled: {e}")
                     gen_enabled = True
                 if gen_enabled:
                     try:
@@ -329,12 +334,13 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                                 logger.info(
                                     f"[CONTENT] meta: model={meta.get('model')} prompt_len={meta.get('prompt_len')} posts={meta.get('posts')} has_media={meta.get('has_media')}"
                                 )
-                            except Exception:
+                            except Exception as e:
+                                logger.warning(f"[CONTENT] Ошибка логирования мета-информации: {e}")
                                 pass
                         else:
                             logger.info(f"[CONTENT] Используем простой старый генератор")
-                            # Фолбэк: прежний простой генератор
-                            unique_text, meta = generate_unique_content(full_posts, method='auto')
+                            # Fallback: прежний простой генератор
+                            unique_text, meta = generate_unique_content(full_posts)
                         dt = (time.perf_counter() - t0) * 1000
                         logger.info(f"[CONTENT] Генерация завершена: cluster={cluster_id}, mode={mode}, ms={dt:.0f}, length={len(unique_text or '')}")
                         if unique_text and unique_text.strip():
