@@ -4,10 +4,11 @@ CREATE TABLE IF NOT EXISTS users (
     user_tg_id BIGINT UNIQUE NOT NULL,
     username VARCHAR(255),
     first_name VARCHAR(255),
-    last_name VARCHAR(255),
+    full_name VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     last_active TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    is_active BOOLEAN DEFAULT TRUE
+    status VARCHAR DEFAULT 'active' NOT NULL,
+    role VARCHAR DEFAULT 'user' NOT NULL
 );
 
 -- Создание таблицы категорий
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS channels (
     username VARCHAR(255),
     title VARCHAR(255) NOT NULL,
     description TEXT,
-    subscribers_count INTEGER DEFAULT 0,
+    subscribers_count BIGINT DEFAULT 0,
     is_active BOOLEAN DEFAULT TRUE,
     reputation_score REAL DEFAULT 0.5,
     ad_ratio REAL DEFAULT 0.0,
@@ -40,23 +41,31 @@ CREATE TABLE IF NOT EXISTS posts (
     post_id SERIAL PRIMARY KEY,
     channel_tg_id BIGINT REFERENCES channels(channel_tg_id),
     content TEXT NOT NULL,
-    embedding DOUBLE PRECISION[] NOT NULL,
     media_urls TEXT[],
     published_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     is_hot BOOLEAN DEFAULT FALSE,
     views_count INTEGER DEFAULT 0,
+    message_id BIGINT,
+    embedding DOUBLE PRECISION[] NOT NULL,
     reactions_count INTEGER DEFAULT 0,
     comments_count INTEGER DEFAULT 0,
     forwards_count INTEGER DEFAULT 0,
-    engagement_score REAL DEFAULT 0,
+    engagement_score DOUBLE PRECISION DEFAULT 0,
     last_engagement_update TIMESTAMP WITH TIME ZONE,
     prev_views_count INTEGER DEFAULT 0,
     prev_reactions_count INTEGER DEFAULT 0,
     prev_comments_count INTEGER DEFAULT 0,
     prev_forwards_count INTEGER DEFAULT 0,
-    status VARCHAR(16) DEFAULT 'active',
-    message_id BIGINT
+    status VARCHAR(20) NOT NULL DEFAULT 'active'
+);
+
+-- Реакции на посты
+CREATE TABLE IF NOT EXISTS post_reactions (
+    post_id INTEGER REFERENCES posts(post_id),
+    reaction_emoji TEXT NOT NULL,
+    count INTEGER DEFAULT 0,
+    PRIMARY KEY (post_id, reaction_emoji)
 );
 
 -- Создание таблицы связи пользователей с категориями
@@ -95,7 +104,7 @@ CREATE TABLE clusters (
     main_post_id INTEGER,
     expires_at TIMESTAMP,
     post_count INTEGER DEFAULT 0,
-    status VARCHAR(16) DEFAULT 'active'
+    status VARCHAR(20) NOT NULL DEFAULT 'active'
 );
 
 -- Создание таблицы связи кластера с постами
@@ -111,7 +120,6 @@ CREATE INDEX IF NOT EXISTS idx_news_is_hot ON posts(is_hot);
 CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
 CREATE INDEX IF NOT EXISTS idx_user_news_is_read ON user_posts(is_read);
 CREATE INDEX IF NOT EXISTS idx_channels_is_active ON channels(is_active);
-CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_cluster_posts_cluster_id ON cluster_posts(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_cluster_posts_post_id ON cluster_posts(post_id);
@@ -254,3 +262,14 @@ CREATE TABLE IF NOT EXISTS cluster_scores (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cluster_scores_cluster_id ON cluster_scores(cluster_id);
+
+-- Сгенерированные статьи по кластерам
+CREATE TABLE IF NOT EXISTS generated_articles (
+    id SERIAL PRIMARY KEY,
+    cluster_id INTEGER REFERENCES clusters(cluster_id) ON DELETE CASCADE,
+    mode VARCHAR(2) NOT NULL,
+    model_name VARCHAR(128),
+    text TEXT NOT NULL,
+    facts_json JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
