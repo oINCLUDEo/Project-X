@@ -1,3 +1,6 @@
+-- Расширение pgvector для хранения векторных эмбеддингов
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- Создание таблицы пользователей
 CREATE TABLE IF NOT EXISTS users (
     user_id SERIAL PRIMARY KEY,
@@ -48,6 +51,7 @@ CREATE TABLE IF NOT EXISTS posts (
     views_count INTEGER DEFAULT 0,
     message_id BIGINT,
     embedding DOUBLE PRECISION[] NOT NULL,
+    embedding_vec VECTOR(768) NOT NULL,
     reactions_count INTEGER DEFAULT 0,
     comments_count INTEGER DEFAULT 0,
     forwards_count INTEGER DEFAULT 0,
@@ -126,6 +130,12 @@ CREATE INDEX IF NOT EXISTS idx_cluster_posts_post_id ON cluster_posts(post_id);
 
 -- Уникальность поста в рамках канала по message_id
 CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_channel_message ON posts(channel_tg_id, message_id);
+
+-- Индекс ANN HNSW по векторному столбцу для быстрых похожестей
+-- Параметры m/ef_construction можно подстраивать под объём данных
+CREATE INDEX IF NOT EXISTS idx_posts_embedding_hnsw
+ON posts USING hnsw (embedding_vec vector_cosine_ops)
+WITH (m = 20, ef_construction = 200);
 
 -- Триггер для счета количества постов в кластере
 CREATE OR REPLACE FUNCTION increment_post_count()
@@ -206,11 +216,11 @@ ON CONFLICT (name) DO NOTHING;
 CREATE TABLE IF NOT EXISTS ad_decisions (
     decision_id SERIAL PRIMARY KEY,
     post_id INTEGER REFERENCES posts(post_id) ON DELETE CASCADE,
-    stage SMALLINT NOT NULL, -- 1: префильтр, 2: AI
+    stage SMALLINT NOT NULL, -- 1: пре-фильтр, 2: AI
     score REAL,              -- скалярная оценка вероятности рекламы [0..1]
     decision VARCHAR(16) NOT NULL, -- 'ad' | 'not_ad' | 'review'
     model_version VARCHAR(64),
-    features JSONB,          -- сохраняем интерпретируемые признаки префильтра или AI
+    features JSONB,          -- сохраняем интерпретируемые признаки пре-фильтра или AI
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

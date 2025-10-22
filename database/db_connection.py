@@ -16,7 +16,7 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_system_param', 'set_system_param', 'log_cluster_score',
            'get_channel_tg_id_for_post', 'recalc_channel_reputation', 'get_post_prev_metrics',
            'get_channel_reputation', 'get_channel_reputation_by_post_id', 'get_cluster_metadata',
-           'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores',
+           'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores', 'find_nearest_active_cluster',
            'record_user_feedback', 'get_cluster_posts_full',
            'put_generated_article', 'get_generated_article_cluster_id_by_text_prefix',
            'get_generated_articles_by_date', 'get_active_clusters', 'user_exists']
@@ -314,13 +314,13 @@ def update_channel_info(channel_tg_id: int, username: str = None, title: str = N
         raise
 
 
-def add_post(channel_tg_id: int, content: str, embedding: list[float], media_urls: list[str], message_id: int = None):
+def add_post(channel_tg_id: int, content: str, media_urls: list[str], embedding_vec: list[float], message_id: int = None):
     """
     Добавляет новость с эмбеддингом в базу данных, включая message_id.
     """
     query = """
-        INSERT INTO posts (channel_tg_id, content, embedding, media_urls, message_id)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO posts (channel_tg_id, content, media_urls, message_id, embedding_vec)
+        VALUES (%s, %s, %s, %s, %s::vector)
         RETURNING post_id;
     """
     try:
@@ -331,9 +331,9 @@ def add_post(channel_tg_id: int, content: str, embedding: list[float], media_url
                 cur.execute(query, (
                     channel_tg_id,
                     norm_content,
-                    embedding,
                     media_urls,
-                    message_id
+                    message_id,
+                    embedding_vec
                 ))
                 post_id = cur.fetchone()[0]
                 logger.info(f"Новость успешно добавлена с ID {post_id}")
@@ -376,7 +376,7 @@ def get_recent_clusters_with_embeddings(limit: int | None = None) -> list[tuple[
     Если limit указан (int) — ограничивает количество, иначе возвращает все кластеры.
     """
     base_query = (
-        "SELECT c.cluster_id, p.embedding "
+        "SELECT c.cluster_id, p.embedding_vec "
         "FROM clusters c "
         "JOIN posts p ON c.main_post_id = p.post_id "
         "ORDER BY c.created_at DESC"
@@ -391,6 +391,33 @@ def get_recent_clusters_with_embeddings(limit: int | None = None) -> list[tuple[
         with conn.cursor() as cur:
             cur.execute(query, params)
             return [(row[0], row[1]) for row in cur.fetchall()]
+
+def find_nearest_active_cluster(embedding: list[float], time_window_minutes: int = 720, max_distance: float = 0.35) -> tuple[int | None, float]:
+    """
+    Ищет ближайший активный кластер по косинусной дистанции через HNSW/pgvector.
+    Возвращает пару (cluster_id, similarity) или (None, 0.0), если не найдено приемлемого соответствия.
+    """
+    query = """
+        SELECT c.cluster_id,
+               1 - (p.embedding_vec <=> %s::vector) AS similarity
+        FROM clusters c
+        JOIN posts p ON p.post_id = c.main_post_id
+        WHERE c.status = 'active'
+          AND c.created_at > NOW() - (INTERVAL '1 minute' * %s)
+        ORDER BY p.embedding_vec <=> %s::vector
+        LIMIT 1;
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (embedding, time_window_minutes, embedding))
+            row = cur.fetchone()
+            if not row:
+                return None, 0.0
+            cluster_id, similarity = row[0], float(row[1])
+            # Конверсия max_distance (в косинусной метрике <=>) в similarity: similarity = 1 - distance
+            if (1.0 - similarity) <= max_distance:
+                return cluster_id, similarity
+            return None, similarity
 
 def get_expired_clusters():
     """

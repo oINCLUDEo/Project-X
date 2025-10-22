@@ -67,7 +67,7 @@ def validate_post(event, post_type):
 def process_ai_and_clustering(msg_from_channel_id, message_text, media_urls=None, message_id=None):
     safe_text = message_text or ""
     embedding = get_embedding(safe_text)
-    post_id = add_post(msg_from_channel_id, safe_text, embedding, media_urls, message_id=message_id)
+    post_id = add_post(msg_from_channel_id, safe_text, media_urls, message_id=message_id, embedding_vec=embedding)
     clustering_result = process_post_and_cluster(embedding, post_id)
     logger.info(f"Пост ID {post_id} обработан и кластеризован (Cluster ID: {clustering_result['cluster_id']}, Схожесть: {clustering_result['similarity']})")
     # Немедленный запуск фильтра рекламы на свежем посте (опционально)
