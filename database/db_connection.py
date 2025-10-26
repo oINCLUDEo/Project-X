@@ -19,7 +19,8 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_posts_by_cluster_with_reputation', 'get_recent_clusters', 'get_latest_cluster_scores', 'find_nearest_active_cluster',
            'record_user_feedback', 'get_cluster_posts_full',
            'put_generated_article', 'get_generated_article_cluster_id_by_text_prefix',
-           'get_generated_articles_by_date', 'get_active_clusters', 'user_exists']
+           'get_generated_articles_by_date', 'get_active_clusters', 'user_exists', 'get_user_id',
+           'get_user_categories', 'get_user_stats', 'update_user_bio']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -116,12 +117,12 @@ def get_channel_category(channel_tg_id: int) -> list[int]:
             logger.info("Получены категории %s для канала %s", categories, channel_tg_id)
             return categories
 
-def add_user(user_tg_id, username, first_name, full_name):
-    query = "INSERT INTO users(user_tg_id, username, first_name, full_name) VALUES (%s, %s, %s, %s);"
+def add_user(user_tg_id, username, first_name, full_name, bio=None):
+    query = "INSERT INTO users(user_tg_id, username, first_name, full_name, bio) VALUES (%s, %s, %s, %s, %s);"
     try:
         with _get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, (user_tg_id, username, first_name, full_name,))
+                cur.execute(query, (user_tg_id, username, first_name, full_name, bio))
 
         logger.info("[DB] Пользователь успешно добавлен!")
     except psycopg2.IntegrityError:
@@ -1069,3 +1070,183 @@ def get_generated_article_cluster_id_by_text_prefix(prefix: str, min_prefix_len:
             )
             row = cur.fetchone()
             return row[0] if row else None
+
+
+def get_user_categories(user_id: int) -> list[dict]:
+    """
+    Получает категории пользователя с их названиями.
+    
+    Args:
+        user_id: ID пользователя в базе данных
+        
+    Returns:
+        list[dict]: Список словарей с информацией о категориях
+                   Формат: [{'category_id': int, 'name': str, 'description': str|None}, ...]
+    """
+    query = """
+        SELECT c.category_id, c.name, c.description
+        FROM categories c
+        JOIN user_categories uc ON c.category_id = uc.category_id
+        WHERE uc.user_id = %s
+        ORDER BY c.name;
+    """
+    
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id,))
+                categories = []
+                for row in cur.fetchall():
+                    categories.append({
+                        'category_id': row[0],
+                        'name': row[1],
+                        'description': row[2]
+                    })
+                logger.info(f"Получены категории для пользователя {user_id}: {len(categories)}")
+                return categories
+    except psycopg2.Error as e:
+        logger.error(f"Ошибка БД при получении категорий пользователя {user_id}: {e}")
+        return []
+    except Exception as e:
+        logger.exception(f"Неожиданная ошибка при получении категорий пользователя {user_id}: {e}")
+        return []
+
+
+def get_user_stats(user_id: int) -> dict:
+    """
+    Получает статистику пользователя для генерации профиля.
+    
+    Args:
+        user_id: ID пользователя в базе данных
+        
+    Returns:
+        dict: Словарь со статистикой пользователя с ключами:
+            - username (str)
+            - first_name (str|None)
+            - bio (str|None)
+            - total_likes (int)
+            - total_read (int)
+            - days_active (int)
+            - avg_engagement (float)
+            - favorite_phrase (str)
+    """
+    # Константа для дефолтного возврата при ошибке
+    DEFAULT_STATS = {
+        'username': 'user',
+        'first_name': None,
+        'bio': None,
+        'total_likes': 0,
+        'total_read': 0,
+        'days_active': 0,
+        'avg_engagement': 0.0,
+        'favorite_phrase': 'Нет фразы'
+    }
+    
+    query = """
+        WITH user_stats AS (
+            SELECT 
+                u.user_id,
+                u.username,
+                u.first_name,
+                u.bio,
+                u.created_at,
+                COUNT(DISTINCT up.post_id) as total_posts_interacted,
+                COUNT(DISTINCT CASE WHEN up.is_liked THEN up.post_id END) as total_likes,
+                COUNT(DISTINCT CASE WHEN up.is_read THEN up.post_id END) as total_read,
+                EXTRACT(DAYS FROM (CURRENT_TIMESTAMP - u.created_at)) as days_active,
+                COALESCE(AVG(p.engagement_score), 0) as avg_engagement
+            FROM users u
+            LEFT JOIN user_posts up ON u.user_id = up.user_id
+            LEFT JOIN posts p ON up.post_id = p.post_id
+            WHERE u.user_id = %s
+            GROUP BY u.user_id, u.username, u.first_name, u.bio, u.created_at
+        ),
+        favorite_content AS (
+            SELECT LEFT(p.content, 100) as content
+            FROM posts p
+            JOIN user_posts up ON p.post_id = up.post_id
+            WHERE up.user_id = %s AND up.is_liked = true
+            ORDER BY p.engagement_score DESC
+            LIMIT 1
+        )
+        SELECT 
+            us.username,
+            us.first_name,
+            us.bio,
+            us.total_likes,
+            us.total_read,
+            us.days_active,
+            us.avg_engagement,
+            COALESCE(
+                us.bio,
+                (SELECT fc.content FROM favorite_content fc),
+                'Нет фразы'
+            ) as favorite_phrase
+        FROM user_stats us;
+    """
+    
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, user_id))
+                row = cur.fetchone()
+                
+                if not row:
+                    logger.warning(f"Пользователь {user_id} не найден в базе")
+                    return DEFAULT_STATS.copy()
+                
+                # Используем понятные индексы через деструктуризацию
+                username, first_name, bio, total_likes, total_read, days_active, avg_engagement, favorite_phrase = row
+                
+                stats = {
+                    'username': username or 'user',
+                    'first_name': first_name,
+                    'bio': bio,
+                    'total_likes': int(total_likes or 0),
+                    'total_read': int(total_read or 0),
+                    'days_active': int(days_active or 0),
+                    'avg_engagement': float(avg_engagement or 0.0),
+                    'favorite_phrase': favorite_phrase or 'Нет фразы'
+                }
+                
+                # Ограничиваем длину favorite_phrase
+                if stats['favorite_phrase']:
+                    stats['favorite_phrase'] = stats['favorite_phrase'][:100]
+                
+                logger.info(f"Получена статистика для пользователя {user_id}: likes={stats['total_likes']}, days={stats['days_active']}")
+                return stats
+                
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики пользователя {user_id}: {e}", exc_info=True)
+        return DEFAULT_STATS.copy()
+
+
+def update_user_bio(user_tg_id: int, bio: str) -> bool:
+    """
+    Обновляет bio пользователя
+    
+    Args:
+        user_tg_id: Telegram ID пользователя
+        bio: Описание пользователя
+        
+    Returns:
+        True если успешно, False в случае ошибки
+    """
+    query = """
+        UPDATE users 
+        SET bio = %s 
+        WHERE user_tg_id = %s;
+    """
+    
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (bio, user_tg_id))
+                conn.commit()
+                
+        logger.info(f"Bio пользователя {user_tg_id} обновлен")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка обновления bio пользователя {user_tg_id}: {e}")
+        return False
