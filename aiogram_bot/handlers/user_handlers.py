@@ -1,15 +1,18 @@
 import logging
+import os
 
 from aiogram_bot.keyboards import get_main_menu_keyboard, get_onboarding_keyboard
 from database.db_connection import add_user, insert_ad_label, record_user_feedback, \
     get_cluster_posts_full, get_cluster_metadata, \
     get_channel_tg_id_for_post, get_post_content_by_id, get_engagement_score_score_by_post_id, \
     get_cluster_id_by_post, get_channel_reputation_by_post_id, get_ad_label_for_post, \
-    get_recent_ad_decisions, get_system_param, get_generated_articles_by_date, user_exists
+    get_recent_ad_decisions, get_system_param, get_generated_articles_by_date, user_exists, \
+    get_user_id, get_user_stats, get_user_categories
 from helpers.html_utils import fix_html_tags
+from helpers.generate_profile import generate_profile_png
 from datetime import timedelta
-from aiogram import Router, Dispatcher
-from aiogram.types import Message, CallbackQuery
+from aiogram import Router, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.filters import CommandStart, Command
 
 # Инициализируем роутер уровня модуля
@@ -278,3 +281,52 @@ async def handle_onboarding_complete(callback_query: CallbackQuery):
     await callback_query.message.edit_reply_markup(
         reply_markup=get_main_menu_keyboard()
     )
+
+
+@router.message(F.text == "🔥 Мой профиль")
+async def handle_my_profile(message: Message):
+    """Отправляет пользователю его профиль в виде PNG"""
+    user_tg_id = message.from_user.id
+    
+    try:
+        # Получаем ID пользователя в БД
+        user_id = get_user_id(user_tg_id)
+        # Получаем статистику пользователя
+        stats = get_user_stats(user_id)
+        # Получаем категории пользователя
+        categories = get_user_categories(user_id)
+        category_names = [cat['name'] for cat in categories]
+        
+        # Подготовка пользовательской статистику для генерации профиля
+        user_data = {
+            'username': stats.get('username', 'user'),
+            'likes': stats.get('total_likes', 0),
+            'days': int(stats.get('days_active', 0)),
+            'categories': category_names if category_names else ['Общие новости'],
+            'phrase': stats.get('favorite_phrase', ''),
+            # Image path can be added later if user uploads profile photo
+        }
+        
+        # Генерация профиля по PNG шаблону
+        template_path = 'assets/profile_template.png'
+        png_path = f'generated_profiles/profile_{user_tg_id}.png'
+        success = generate_profile_png(template_path, png_path, user_data)
+        
+        if success and os.path.exists(png_path):
+            photo = FSInputFile(png_path)
+            await message.answer_photo(
+                photo,
+                caption=f"📊 <b>Ваш профиль</b>\n\n"
+                       f"👤 <b>Имя:</b> {message.from_user.first_name}\n"
+                       f"❤️ <b>Лайков поставлено:</b> {stats.get('total_likes', 0)}\n"
+                       f"📅 <b>Дней в системе:</b> {int(stats.get('days_active', 0))}\n"
+                       f"📖 <b>Прочитано постов:</b> {stats.get('total_read', 0)}\n"
+                       f"⭐ <b>Средний engagement:</b> {stats.get('avg_engagement', 0):.2f}",
+                parse_mode='HTML'
+            )
+        else:
+            await message.answer("❌ Ошибка генерации профиля")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при генерации профиля для пользователя {user_tg_id}: {e}")
+        await message.answer("❌ Произошла ошибка при создании профиля. Попробуйте позже.")
