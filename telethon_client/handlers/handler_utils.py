@@ -6,7 +6,9 @@ from telethon import utils
 from database.db_connection import get_channel_category, get_category_users, add_post, \
     get_main_post_for_cluster, get_active_clusters, get_posts_by_cluster, archive_cluster, get_posts_in_active_clusters, \
     get_posts_by_cluster_with_reputation, log_cluster_score, get_system_param, recalc_channel_reputation, \
-    get_cluster_metadata, get_latest_cluster_scores, get_cluster_posts_full, put_generated_article
+    get_cluster_metadata, get_latest_cluster_scores, get_cluster_posts_full, put_generated_article, \
+    get_expired_active_clusters, transition_cluster_to_cooling, get_expired_cooling_clusters, archive_cooling_cluster, \
+    get_active_and_cooling_clusters, update_cluster_status, update_post_status
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram import types
 from aiogram.enums import ParseMode
@@ -344,13 +346,16 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                         dt = (time.perf_counter() - t0) * 1000
                         logger.info(f"[CONTENT] Генерация завершена: cluster={cluster_id}, mode={mode}, ms={dt:.0f}, length={len(unique_text or '')}")
                         if unique_text and unique_text.strip():
-                            # Подменяем контент главного поста
+                            # Сохраняем сгенерированный текст ДО обновления main_post
+                            # чтобы гарантировать что сохраняется именно сгенерированный текст
+                            model_name = meta.get('model') if isinstance(meta, dict) else None
+                            logger.debug(f"[CONTENT] Сохранение в БД: cluster={cluster_id}, text_length={len(unique_text)}, text_preview={unique_text[:100]}...")
+                            put_generated_article(cluster_id, mode, unique_text, model_name)
+                            
+                            # Затем подменяем контент главного поста
                             as_list = list(main_post)
                             as_list[2] = unique_text
                             main_post = tuple(as_list)
-
-                            model_name = meta.get('model') if isinstance(meta, dict) else None
-                            put_generated_article(cluster_id, mode, unique_text, model_name)
                     except Exception as e:
                         logger.error(f"[CONTENT] Ошибка генерации уникального контента для кластера {cluster_id}: {e}", exc_info=True)
                 else:
@@ -393,4 +398,47 @@ async def reputation_refresher_task(interval_seconds: int = 21600):
                     logger.error(f"Ошибка пересчёта репутации канала {ch_id}: {e}")
         except Exception as e:
             logger.error(f"Ошибка в reputation_refresher_task: {e}")
+        await asyncio.sleep(interval_seconds)
+
+async def cluster_lifecycle_manager_task(interval_seconds: int = 3600):
+    """
+    Управляет жизненным циклом кластеров:
+    - Архивирует истёкшие активные кластеры, которые не были опубликованы (пропустили окно публикации)
+    - Архивирует истёкшие охлаждающиеся кластеры (после 3 дней охлаждения)
+    
+    Note: Опубликованные кластеры автоматически переводятся в 'cooling' в engagement_publisher_task
+    через функцию archive_cluster().
+    
+    По умолчанию каждые 1 час.
+    """
+    while True:
+        try:
+            # Архивирование истёкших активных кластеров, которые не были опубликованы
+            # (обычно не должно быть таких, так как engagement_publisher_task их обрабатывает)
+            expired_active = get_expired_active_clusters()
+            if expired_active:
+                logger.info(f"[LIFECYCLE] Найдено {len(expired_active)} истёкших активных кластеров для архивации")
+                for cluster_id, main_post_id in expired_active:
+                    try:
+                        # Архивируем кластер и все его посты
+                        update_cluster_status(cluster_id, 'archived')
+                        posts = get_posts_by_cluster(cluster_id)
+                        for post in posts:
+                            update_post_status(post['post_id'], 'archived')
+                        logger.info(f"[LIFECYCLE] Кластер {cluster_id} архивирован (не был опубликован)")
+                    except Exception as e:
+                        logger.error(f"[LIFECYCLE] Ошибка архивации кластера {cluster_id}: {e}")
+            
+            # Архивирование истёкших охлаждающихся кластеров
+            expired_cooling = get_expired_cooling_clusters()
+            if expired_cooling:
+                logger.info(f"[LIFECYCLE] Найдено {len(expired_cooling)} истёкших охлаждающихся кластеров для архивации")
+                for cluster_id, main_post_id in expired_cooling:
+                    try:
+                        archive_cooling_cluster(cluster_id)
+                        logger.info(f"[LIFECYCLE] Кластер {cluster_id} окончательно архивирован после периода охлаждения")
+                    except Exception as e:
+                        logger.error(f"[LIFECYCLE] Ошибка архивации кластера {cluster_id}: {e}")
+        except Exception as e:
+            logger.error(f"[LIFECYCLE] Ошибка в cluster_lifecycle_manager_task: {e}")
         await asyncio.sleep(interval_seconds)

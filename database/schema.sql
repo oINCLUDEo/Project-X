@@ -108,6 +108,7 @@ CREATE TABLE clusters (
     lifetime_minutes INTEGER NOT NULL,
     main_post_id INTEGER,
     expires_at TIMESTAMP,
+    cooling_expires_at TIMESTAMP,
     post_count INTEGER DEFAULT 0,
     status VARCHAR(20) NOT NULL DEFAULT 'active'
 );
@@ -126,6 +127,7 @@ CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
 CREATE INDEX IF NOT EXISTS idx_user_news_is_read ON user_posts(is_read);
 CREATE INDEX IF NOT EXISTS idx_channels_is_active ON channels(is_active);
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
+CREATE INDEX IF NOT EXISTS idx_clusters_cooling_expires_at ON clusters(cooling_expires_at);
 CREATE INDEX IF NOT EXISTS idx_cluster_posts_cluster_id ON cluster_posts(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_cluster_posts_post_id ON cluster_posts(post_id);
 

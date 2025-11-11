@@ -20,7 +20,9 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'record_user_feedback', 'get_cluster_posts_full',
            'put_generated_article', 'get_generated_article_cluster_id_by_text_prefix',
            'get_generated_articles_by_date', 'get_active_clusters', 'user_exists', 'get_user_id',
-           'get_user_categories', 'get_user_stats', 'update_user_bio']
+           'get_user_categories', 'get_user_stats', 'update_user_bio', 'get_expired_active_clusters',
+           'transition_cluster_to_cooling', 'get_expired_cooling_clusters', 'get_cooling_clusters',
+           'archive_cooling_cluster', 'get_active_and_cooling_clusters']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -395,7 +397,7 @@ def get_recent_clusters_with_embeddings(limit: int | None = None) -> list[tuple[
 
 def find_nearest_active_cluster(embedding: list[float], time_window_minutes: int = 720, max_distance: float = 0.35) -> tuple[int | None, float]:
     """
-    Ищет ближайший активный кластер по косинусной дистанции через HNSW/pgvector.
+    Ищет ближайший активный или охлаждающийся кластер по косинусной дистанции через HNSW/pgvector.
     Возвращает пару (cluster_id, similarity) или (None, 0.0), если не найдено приемлемого соответствия.
     """
     query = """
@@ -403,7 +405,7 @@ def find_nearest_active_cluster(embedding: list[float], time_window_minutes: int
                1 - (p.embedding_vec <=> %s::vector) AS similarity
         FROM clusters c
         JOIN posts p ON p.post_id = c.main_post_id
-        WHERE c.status = 'active'
+        WHERE c.status IN ('active', 'cooling')
           AND c.created_at > NOW() - (INTERVAL '1 minute' * %s)
         ORDER BY p.embedding_vec <=> %s::vector
         LIMIT 1;
@@ -433,13 +435,89 @@ def get_expired_clusters():
             cur.execute(query)
             return cur.fetchall()  # [(cluster_id, main_post_id), ...]
 
+def get_expired_active_clusters():
+    """
+    Возвращает список активных кластеров, у которых истёк срок жизни.
+    Эти кластеры должны быть архивированы (не были опубликованы).
+    """
+    query = """
+        SELECT cluster_id, main_post_id FROM clusters
+        WHERE expires_at < NOW() AND status = 'active'
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()  # [(cluster_id, main_post_id), ...]
+
+def get_cooling_clusters():
+    """
+    Возвращает список кластеров в статусе 'cooling'.
+    """
+    query = """
+        SELECT cluster_id, main_post_id FROM clusters
+        WHERE status = 'cooling'
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()  # [(cluster_id, main_post_id), ...]
+
+def get_expired_cooling_clusters():
+    """
+    Возвращает список кластеров в статусе 'cooling', у которых истёк срок охлаждения.
+    Эти кластеры должны быть переведены в статус 'archived'.
+    """
+    query = """
+        SELECT cluster_id, main_post_id FROM clusters
+        WHERE cooling_expires_at < NOW() AND status = 'cooling'
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()  # [(cluster_id, main_post_id), ...]
+
+def transition_cluster_to_cooling(cluster_id: int, cooling_days: int = 3):
+    """
+    Переводит активный кластер в статус 'cooling' и устанавливает время истечения охлаждения.
+    
+    Args:
+        cluster_id: ID кластера
+        cooling_days: Количество дней для охлаждения (по умолчанию 3 дня)
+    """
+    query = """
+        UPDATE clusters 
+        SET status = 'cooling', 
+            cooling_expires_at = NOW() + (INTERVAL '1 day' * %s)
+        WHERE cluster_id = %s
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cooling_days, cluster_id))
+            conn.commit()
+            logger.info(f"Кластер {cluster_id} переведён в статус 'cooling' на {cooling_days} дней")
+
 def get_active_clusters():
     """
-    Возвращает список активных кластеров (expires_at > NOW()).
+    Возвращает список активных кластеров (expires_at > NOW() AND status = 'active').
+    Для publishing task нужны только по-настоящему активные кластеры, не охлаждающиеся.
     """
     query = """
         SELECT cluster_id, main_post_id FROM clusters
         WHERE expires_at > NOW() AND status = 'active'
+    """
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()  # [(cluster_id, main_post_id), ...]
+
+def get_active_and_cooling_clusters():
+    """
+    Возвращает список активных и охлаждающихся кластеров.
+    Используется для metrics/analytics.
+    """
+    query = """
+        SELECT cluster_id, main_post_id FROM clusters
+        WHERE status IN ('active', 'cooling')
     """
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -509,14 +587,14 @@ def delete_cluster(cluster_id):
 
 def get_posts_in_active_clusters():
     """
-    Возвращает список постов (post_id, channel_tg_id, message_id) из активных кластеров.
+    Возвращает список постов (post_id, channel_tg_id, message_id) из активных и охлаждающихся кластеров.
     """
     query = """
         SELECT p.post_id, p.channel_tg_id, p.message_id
         FROM clusters c
         JOIN cluster_posts cp ON c.cluster_id = cp.cluster_id
         JOIN posts p ON cp.post_id = p.post_id
-        WHERE c.expires_at > NOW() AND c.status = 'active'
+        WHERE c.status IN ('active', 'cooling')
     """
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -739,9 +817,16 @@ def get_posts_by_cluster_with_reputation(cluster_id):
 
 def archive_cluster(cluster_id):
     """
-    Архивирует кластер и связанные с ним посты.
+    Переводит опубликованный кластер в статус 'cooling' (3 дня охлаждения).
+    Это позволяет кластеру еще получать похожие новости после публикации.
     """
-    query_cluster = "UPDATE clusters SET status = 'archived' WHERE cluster_id = %s;"
+    # Переводим в cooling вместо архивации, чтобы дать время на получение похожих постов
+    query_cluster = """
+        UPDATE clusters 
+        SET status = 'cooling',
+            cooling_expires_at = NOW() + INTERVAL '3 days'
+        WHERE cluster_id = %s;
+    """
     query_posts = """
             UPDATE posts
             SET status = 'archived'
@@ -754,6 +839,19 @@ def archive_cluster(cluster_id):
             cur.execute(query_cluster, (cluster_id,))
             cur.execute(query_posts, (cluster_id,))
             conn.commit()
+            logger.info(f"Кластер {cluster_id} переведён в статус 'cooling' после публикации")
+
+def archive_cooling_cluster(cluster_id):
+    """
+    Архивирует охлаждающийся кластер в статус 'archived'.
+    Это финальная архивация после периода охлаждения.
+    """
+    query_cluster = "UPDATE clusters SET status = 'archived' WHERE cluster_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query_cluster, (cluster_id,))
+            conn.commit()
+            logger.info(f"Кластер {cluster_id} окончательно архивирован после периода охлаждения")
 
 def update_post_status(post_id, status):
     """

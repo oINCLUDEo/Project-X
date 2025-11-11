@@ -5,7 +5,7 @@ from config.config import load_config
 from database.db_connection import *
 from telethon_client.start_telethon import setup_handlers, update_engagement_for_active_cluster_posts
 from aiogram_bot.handlers import user_handlers
-from telethon_client.handlers.handler_utils import engagement_publisher_task, reputation_refresher_task
+from telethon_client.handlers.handler_utils import engagement_publisher_task, reputation_refresher_task, cluster_lifecycle_manager_task
 
 from aiogram import Bot, Dispatcher
 from telethon import TelegramClient
@@ -90,10 +90,11 @@ async def _run_with_restarts(name, coro_func, base_delay=5, max_delay=60):
 async def main():
     publisher = asyncio.create_task(engagement_publisher_task(bot))
     reputation = asyncio.create_task(reputation_refresher_task())
+    lifecycle = asyncio.create_task(cluster_lifecycle_manager_task())
     # Оборачиваем критические задачи перезапуском
     telethon_task = asyncio.create_task(_run_with_restarts("telethon", start_telethon))
     aiogram_task = asyncio.create_task(_run_with_restarts("aiogram", start_aiogram))
-    await asyncio.gather(telethon_task, aiogram_task, publisher, reputation)
+    await asyncio.gather(telethon_task, aiogram_task, publisher, reputation, lifecycle)
 
 
 # TODO: Надо растащить куски aiogram и telethon в два модуля оставив тут main

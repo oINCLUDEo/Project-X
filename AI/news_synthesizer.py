@@ -673,6 +673,8 @@ def synthesize_news(cluster_posts: List[Dict], mode: str = 'A', has_media: bool 
     if not text:
         # Fallback без LLM
         logger.warning("[SYNTH] Генерация LLM не удалась, используем fallback")
+        text = "❌ Ошибка генерации кластера"
+        model_used = "Fallback"
         # TODO: Нужно реализовать метод, чтобы при подобных ошибках администраторы оперативно получали информацию об этом
 
     # Нормализация выхода
