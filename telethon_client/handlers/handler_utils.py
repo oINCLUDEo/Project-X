@@ -8,7 +8,8 @@ from database.db_connection import get_channel_category, get_category_users, add
     get_posts_by_cluster_with_reputation, log_cluster_score, get_system_param, recalc_channel_reputation, \
     get_cluster_metadata, get_latest_cluster_scores, get_cluster_posts_full, put_generated_article, \
     get_expired_active_clusters, transition_cluster_to_cooling, get_expired_cooling_clusters, archive_cooling_cluster, \
-    get_active_and_cooling_clusters, update_cluster_status, update_post_status
+    get_active_and_cooling_clusters, update_cluster_status, update_post_status, \
+    get_cluster_categories, get_user_id, get_user_tg_id, add_to_user_queue
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram import types
 from aiogram.enums import ParseMode
@@ -20,6 +21,8 @@ from AI.clustering import process_post_and_cluster
 from helpers.helpers import compute_cluster_score, get_users_for_post
 from AI.content_generator import generate_unique_content
 from AI.news_synthesizer import synthesize_news
+from helpers.personalization import calculate_personal_score, calculate_priority
+from helpers.rate_limiting import get_user_priority_threshold
 
 logger = logging.getLogger(__name__)
 
@@ -303,11 +306,7 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                 if not main_post:
                     logger.warning(f"Главный пост {main_post_id} не найден в кластере {cluster_id}")
                     continue
-                channel_tg_id = main_post[1]
-                users = get_users_for_post(channel_tg_id)
-                if not users:
-                    logger.info(f"Нет пользователей для поста {main_post_id} канала {channel_tg_id}")
-                    continue
+                
                 # Генерация уникального/синтезированного контента на основе всего кластера (включается системным параметром)
                 try:
                     gen_enabled_raw = (get_system_param('content_generation_enabled', '1') or '1').lower()
@@ -351,25 +350,67 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                             model_name = meta.get('model') if isinstance(meta, dict) else None
                             logger.debug(f"[CONTENT] Сохранение в БД: cluster={cluster_id}, text_length={len(unique_text)}, text_preview={unique_text[:100]}...")
                             put_generated_article(cluster_id, mode, unique_text, model_name)
-                            
-                            # Затем подменяем контент главного поста
-                            as_list = list(main_post)
-                            as_list[2] = unique_text
-                            main_post = tuple(as_list)
                     except Exception as e:
                         logger.error(f"[CONTENT] Ошибка генерации уникального контента для кластера {cluster_id}: {e}", exc_info=True)
                 else:
                     logger.info(f"[CONTENT] Генерация уникального контента отключена системным параметром для cluster={cluster_id}")
-                # Атомарная отправка: архивируем только при успешной отправке всем пользователям
-                publish_success = await publish_main_post(bot, users, main_post)
-                if publish_success:
-                    if bypass_age:
-                        logger.info(f"Кластер {cluster_id} опубликован (bypass age) score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, bypass_margin={bypass_margin:.3f}, posts>={min_posts_in_cluster})")
-                    else:
-                        logger.info(f"Кластер {cluster_id} опубликован score={score_to_use:.4f} (algo={algo}, cutoff={dynamic_cutoff:.3f}, age>={min_age_minutes}m, posts>={min_posts_in_cluster})")
-                    archive_cluster(cluster_id)
+                
+                # НОВАЯ ЛОГИКА: Добавляем кластер в очереди пользователей вместо прямой отправки
+                # Получаем категории кластера
+                categories = get_cluster_categories(cluster_id)
+                if not categories:
+                    logger.warning(f"Кластер {cluster_id} не имеет категорий, пропускаем")
+                    continue
+                
+                # Получаем пользователей категорий
+                all_users_tg_id = get_category_users(tuple(categories))
+                if not all_users_tg_id:
+                    logger.info(f"Нет пользователей для кластера {cluster_id}")
+                    continue
+                
+                # Для каждого пользователя вычисляем personal score и добавляем в очередь
+                users_added = 0
+                users_skipped = 0
+                
+                for user_tg_id in all_users_tg_id:
+                    try:
+                        user_id = get_user_id(user_tg_id)  # получаем user_id из БД
+                        if not user_id:
+                            logger.warning(f"Не найден user_id для user_tg_id={user_tg_id}")
+                            continue
+                        
+                        # Вычисляем персональный score
+                        personal_score = calculate_personal_score(cluster_id, user_id)
+                        
+                        # Проверяем threshold
+                        threshold = get_user_priority_threshold(user_id)
+                        if personal_score < threshold:
+                            users_skipped += 1
+                            logger.debug(f"[QUEUE] Пропуск user_id={user_id}, cluster_id={cluster_id}: personal_score={personal_score:.3f} < threshold={threshold:.3f}")
+                            continue  # Пропускаем пользователя
+                        
+                        # Вычисляем приоритет
+                        priority = calculate_priority(personal_score, score_to_use)
+                        
+                        # Добавляем в очередь пользователя
+                        add_to_user_queue(user_id, cluster_id, personal_score, priority)
+                        users_added += 1
+                        
+                        logger.debug(f"[QUEUE] Добавлен user_id={user_id}, cluster_id={cluster_id}, personal_score={personal_score:.3f}, priority={priority}")
+                        
+                    except Exception as e:
+                        logger.error(f"[QUEUE] Ошибка добавления в очередь для user_tg_id={user_tg_id}, cluster_id={cluster_id}: {e}", exc_info=True)
+                        continue
+                
+                # Логируем результат
+                if bypass_age:
+                    logger.info(f"[QUEUE] Кластер {cluster_id} добавлен в очереди: добавлено={users_added}, пропущено={users_skipped}, score={score_to_use:.4f} (bypass age)")
                 else:
-                    logger.error(f"Кластер {cluster_id} НЕ опубликован из-за ошибок отправки - статус не изменён")
+                    logger.info(f"[QUEUE] Кластер {cluster_id} добавлен в очереди: добавлено={users_added}, пропущено={users_skipped}, score={score_to_use:.4f}")
+                
+                # Архивируем кластер после добавления в очереди
+                # (отправка будет выполнена user_queue_processor_task)
+                archive_cluster(cluster_id)
             else:
                 reasons = []
                 if score_to_use < dynamic_cutoff:
@@ -379,6 +420,127 @@ async def engagement_publisher_task(bot, interval=300, min_score=0.5):
                 if not meets_volume:
                     reasons.append(f"posts<count_min ({min_posts_in_cluster})")
                 logger.info(f"[PUBLISH] Кластер {cluster_id} не опубликован: {', '.join(reasons)}")
+        await asyncio.sleep(interval)
+
+
+async def user_queue_processor_task(bot, interval=300):
+    """
+    Обрабатывает очереди пользователей и отправляет новости.
+    Периодически проверяет очереди пользователей, проверяет квоты и отправляет новости.
+    """
+    from helpers.rate_limiting import check_user_quota, should_send_now, get_optimal_send_time
+    from database.db_connection import (
+        get_active_users, get_user_queue, get_main_post_for_cluster,
+        mark_queue_item_sent, increment_user_post_counter, get_user_tg_id
+    )
+    
+    while True:
+        try:
+            # Получаем всех активных пользователей
+            user_ids = get_active_users()
+            logger.info(f"[QUEUE] Обработка очередей для {len(user_ids)} пользователей")
+            
+            for user_id in user_ids:
+                try:
+                    # Проверяем квоты
+                    quota = check_user_quota(user_id)
+                    if not quota['can_send_daily']:
+                        continue  # Дневная квота исчерпана
+                    
+                    # Получаем очередь пользователя (лимит = оставшееся количество постов в час или дневной лимит)
+                    if quota['can_send_hourly'] and quota['can_send_daily']:
+                        limit = min(quota['hourly_remaining'], quota['daily_remaining'], 10)
+                    else:
+                        limit = 0
+                    
+                    if limit <= 0:
+                        continue  # Нет места для отправки
+                    
+                    queue = get_user_queue(user_id, limit=limit)
+                    if not queue:
+                        continue  # Очередь пуста
+                    
+                    for item in queue:
+                        # Проверяем квоты перед каждой отправкой
+                        quota = check_user_quota(user_id)
+                        if not quota['can_send_daily']:
+                            break  # Дневная квота исчерпана
+                        if not quota['can_send_hourly']:
+                            continue  # Часовая квота исчерпана, пропускаем этот элемент
+                        
+                        cluster_id = item['cluster_id']
+                        personal_score = item['personal_score']
+                        priority = item['priority']
+                        scheduled_for = item.get('scheduled_for')
+                        
+                        # Проверяем, нужно ли отправить сейчас
+                        current_time = datetime.datetime.now()
+                        if scheduled_for and scheduled_for > current_time:
+                            continue  # Еще не время отправки
+                        
+                        if not should_send_now(user_id, personal_score, priority):
+                            continue  # Не нужно отправлять сейчас
+                        
+                        # Получаем пост кластера
+                        main_post = get_main_post_for_cluster(cluster_id)
+                        if not main_post:
+                            # Помечаем как отправленное, чтобы не обрабатывать снова
+                            mark_queue_item_sent(user_id, cluster_id)
+                            logger.warning(f"[QUEUE] Главный пост для cluster_id={cluster_id} не найден, пропускаем")
+                            continue
+                        
+                        # Получаем user_tg_id для отправки
+                        user_tg_id = get_user_tg_id(user_id)
+                        if not user_tg_id:
+                            logger.warning(f"[QUEUE] Не найден user_tg_id для user_id={user_id}")
+                            continue
+                        
+                        # Получаем сгенерированный текст, если он есть
+                        try:
+                            from database.db_connection import get_generated_article_by_cluster_id
+                            generated_text = get_generated_article_by_cluster_id(cluster_id)
+                            if generated_text:
+                                # Заменяем текст поста на сгенерированный
+                                as_list = list(main_post)
+                                as_list[2] = generated_text
+                                main_post = tuple(as_list)
+                                logger.debug(f"[QUEUE] Использован сгенерированный текст для cluster_id={cluster_id}")
+                        except Exception as e:
+                            logger.debug(f"[QUEUE] Не удалось получить сгенерированный текст: {e}")
+                        
+                        # Отправляем пост одному пользователю
+                        try:
+                            success = await publish_main_post(bot, [user_tg_id], main_post)
+                            
+                            if success:
+                                # Обновляем счетчики
+                                increment_user_post_counter(user_id)
+                                
+                                # Помечаем как отправленное
+                                mark_queue_item_sent(user_id, cluster_id)
+                                
+                                logger.info(
+                                    f"[QUEUE] Отправлено user_id={user_id} (tg_id={user_tg_id}), cluster_id={cluster_id}, "
+                                    f"personal_score={personal_score:.3f}, priority={priority}"
+                                )
+                                
+                                # Обновляем квоту для следующей итерации
+                                quota = check_user_quota(user_id)
+                            else:
+                                logger.error(f"[QUEUE] Ошибка отправки user_id={user_id}, cluster_id={cluster_id}")
+                                # Не помечаем как отправленное, чтобы повторить попытку позже
+                                
+                        except Exception as e:
+                            logger.error(f"[QUEUE] Исключение при отправке user_id={user_id}, cluster_id={cluster_id}: {e}", exc_info=True)
+                            # Не помечаем как отправленное, чтобы повторить попытку позже
+                            
+                except Exception as e:
+                    logger.error(f"[QUEUE] Ошибка обработки очереди user_id={user_id}: {e}", exc_info=True)
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"[QUEUE] Ошибка в user_queue_processor_task: {e}", exc_info=True)
+        
         await asyncio.sleep(interval)
 
 

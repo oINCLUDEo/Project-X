@@ -7,7 +7,7 @@ from database.db_connection import add_user, insert_ad_label, record_user_feedba
     get_channel_tg_id_for_post, get_post_content_by_id, get_engagement_score_score_by_post_id, \
     get_cluster_id_by_post, get_channel_reputation_by_post_id, get_ad_label_for_post, \
     get_recent_ad_decisions, get_system_param, get_generated_articles_by_date, user_exists, \
-    get_user_id, get_user_stats, get_user_categories
+    get_user_id, get_user_stats, get_user_categories, update_user_activity_stats
 from helpers.html_utils import fix_html_tags
 from helpers.generate_profile import generate_profile_png
 from datetime import timedelta
@@ -51,6 +51,18 @@ async def process_like_dislike(callback_query: CallbackQuery):
     try:
         if action in ("like", "dislike"):
             record_user_feedback(user_id, post_id_int, action)
+            
+            # Обновляем статистику активности пользователя
+            try:
+                from datetime import datetime
+                user_id_db = get_user_id(user_id)
+                if user_id_db:
+                    current_hour = datetime.now().hour
+                    current_day = datetime.now().weekday()  # 0 = понедельник
+                    update_user_activity_stats(user_id_db, current_hour, current_day)
+            except Exception as e:
+                logger.warning(f"Ошибка обновления статистики активности: {e}")
+            
             if action == "like":
                 await callback_query.answer("Спасибо за лайк! ❤️")
             else:

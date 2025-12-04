@@ -3,7 +3,7 @@ from psycopg2.extras import Json
 import logging
 from config.config import load_config
 import time
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_user', 'add_channel', 'update_channel_info',
            'add_post', 'create_new_cluster', 'add_post_to_cluster', 'get_recent_clusters_with_embeddings',
@@ -22,7 +22,15 @@ __all__ = ['get_channels', 'get_category_users', 'get_channel_category', 'add_us
            'get_generated_articles_by_date', 'get_active_clusters', 'user_exists', 'get_user_id',
            'get_user_categories', 'get_user_stats', 'update_user_bio', 'get_expired_active_clusters',
            'transition_cluster_to_cooling', 'get_expired_cooling_clusters', 'get_cooling_clusters',
-           'archive_cooling_cluster', 'get_active_and_cooling_clusters']
+           'archive_cooling_cluster', 'get_active_and_cooling_clusters',
+           # Новые функции для системы рекомендаций
+           'get_user_category_weights', 'update_user_category_weight', 'get_cluster_categories',
+           'get_cluster_channels', 'get_cluster_embedding', 'get_user_preferred_embedding',
+           'update_user_preferred_embedding', 'get_user_channel_preferences', 'get_user_activity_stats',
+           'update_user_activity_stats', 'get_cluster_created_at', 'get_user_liked_clusters',
+           'add_to_user_queue', 'get_user_queue', 'mark_queue_item_sent', 'get_user_post_count_today',
+           'get_user_post_count_hour', 'increment_user_post_counter', 'get_active_users', 'get_user_tg_id',
+           'get_generated_article_by_cluster_id']
 logger = logging.getLogger(__name__)
 config = load_config()
 
@@ -137,7 +145,18 @@ def get_user_id(user_tg_id: int) -> int:
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(query, (user_tg_id,))
-            return cur.fetchone()[0]
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def get_user_tg_id(user_id: int) -> int:
+    """Возвращает user_tg_id по user_id или None если пользователь не найден."""
+    query = "SELECT user_tg_id FROM users WHERE user_id = %s;"
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (user_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
 
 
 def user_exists(user_tg_id: int) -> bool:
@@ -1170,6 +1189,34 @@ def get_generated_article_cluster_id_by_text_prefix(prefix: str, min_prefix_len:
             return row[0] if row else None
 
 
+def get_generated_article_by_cluster_id(cluster_id: int) -> str | None:
+    """
+    Получает сгенерированный текст для кластера.
+    
+    Args:
+        cluster_id: ID кластера
+        
+    Returns:
+        str: Сгенерированный текст или None если не найден
+    """
+    query = """
+        SELECT text
+        FROM generated_articles
+        WHERE cluster_id = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (cluster_id,))
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+    except Exception as e:
+        logger.error(f"Ошибка получения сгенерированного текста для cluster_id={cluster_id}: {e}")
+        return None
+
+
 def get_user_categories(user_id: int) -> list[dict]:
     """
     Получает категории пользователя с их названиями.
@@ -1348,3 +1395,547 @@ def update_user_bio(user_tg_id: int, bio: str) -> bool:
     except Exception as e:
         logger.error(f"Ошибка обновления bio пользователя {user_tg_id}: {e}")
         return False
+
+
+# ====================
+# Функции для системы рекомендаций и персонализации
+# ====================
+
+def get_user_category_weights(user_id: int) -> Dict[int, float]:
+    """
+    Получает веса категорий для пользователя.
+    
+    Args:
+        user_id: ID пользователя в БД
+        
+    Returns:
+        Dict[int, float]: Словарь {category_id: weight}
+    """
+    query = """
+        SELECT category_id, weight
+        FROM user_category_weights
+        WHERE user_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id,))
+                return {row[0]: float(row[1]) for row in cur.fetchall()}
+    except Exception as e:
+        logger.error(f"Ошибка получения весов категорий для user_id={user_id}: {e}")
+        return {}
+
+
+def update_user_category_weight(user_id: int, category_id: int, delta: float):
+    """
+    Обновляет вес категории для пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        category_id: ID категории
+        delta: Изменение веса (может быть отрицательным)
+    """
+    query = """
+        INSERT INTO user_category_weights (user_id, category_id, weight)
+        VALUES (%s, %s, GREATEST(0.1, LEAST(2.0, 1.0 + %s)))
+        ON CONFLICT (user_id, category_id) DO UPDATE
+        SET weight = GREATEST(0.1, LEAST(2.0, user_category_weights.weight + %s)),
+            last_updated = CURRENT_TIMESTAMP
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, category_id, delta, delta))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка обновления веса категории: {e}")
+
+
+def get_cluster_categories(cluster_id: int) -> List[int]:
+    """
+    Получает список категорий кластера через каналы.
+    
+    Args:
+        cluster_id: ID кластера
+        
+    Returns:
+        List[int]: Список ID категорий
+    """
+    query = """
+        SELECT DISTINCT cc.category_id
+        FROM clusters c
+        JOIN posts p ON p.post_id = c.main_post_id
+        JOIN channels ch ON ch.channel_tg_id = p.channel_tg_id
+        JOIN channel_categories cc ON cc.channel_id = ch.channel_id
+        WHERE c.cluster_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (cluster_id,))
+                return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Ошибка получения категорий кластера {cluster_id}: {e}")
+        return []
+
+
+def get_cluster_channels(cluster_id: int) -> List[int]:
+    """
+    Получает список channel_tg_id каналов в кластере.
+    
+    Args:
+        cluster_id: ID кластера
+        
+    Returns:
+        List[int]: Список channel_tg_id
+    """
+    query = """
+        SELECT DISTINCT p.channel_tg_id
+        FROM clusters c
+        JOIN cluster_posts cp ON cp.cluster_id = c.cluster_id
+        JOIN posts p ON p.post_id = cp.post_id
+        WHERE c.cluster_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (cluster_id,))
+                return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Ошибка получения каналов кластера {cluster_id}: {e}")
+        return []
+
+
+def get_cluster_embedding(cluster_id: int) -> List[float]:
+    """
+    Получает embedding главного поста кластера.
+    
+    Args:
+        cluster_id: ID кластера
+        
+    Returns:
+        List[float]: Embedding вектор или None
+    """
+    query = """
+        SELECT p.embedding_vec
+        FROM clusters c
+        JOIN posts p ON p.post_id = c.main_post_id
+        WHERE c.cluster_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (cluster_id,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    return list(row[0])
+                return None
+    except Exception as e:
+        logger.error(f"Ошибка получения embedding кластера {cluster_id}: {e}")
+        return None
+
+
+def get_user_preferred_embedding(user_id: int) -> List[float]:
+    """
+    Получает предпочтительный embedding пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        
+    Returns:
+        List[float]: Embedding вектор или None
+    """
+    query = """
+        SELECT preferred_embedding
+        FROM user_profiles
+        WHERE user_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    return list(row[0])
+                return None
+    except Exception as e:
+        logger.error(f"Ошибка получения preferred embedding для user_id={user_id}: {e}")
+        return None
+
+
+def update_user_preferred_embedding(user_id: int, embedding: List[float]):
+    """
+    Обновляет предпочтительный embedding пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        embedding: Новый embedding вектор
+    """
+    query = """
+        INSERT INTO user_profiles (user_id, preferred_embedding, last_updated)
+        VALUES (%s, %s::vector, CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id) DO UPDATE
+        SET preferred_embedding = EXCLUDED.preferred_embedding,
+            last_updated = CURRENT_TIMESTAMP
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, embedding))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка обновления preferred embedding для user_id={user_id}: {e}")
+
+
+def get_user_channel_preferences(user_id: int) -> Dict[int, float]:
+    """
+    Получает предпочтения пользователя к каналам.
+    
+    Args:
+        user_id: ID пользователя
+        
+    Returns:
+        Dict[int, float]: Словарь {channel_tg_id: preference_score}
+    """
+    query = """
+        SELECT channel_tg_id, preference_score
+        FROM user_channel_preferences
+        WHERE user_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id,))
+                return {row[0]: float(row[1]) for row in cur.fetchall()}
+    except Exception as e:
+        logger.error(f"Ошибка получения channel preferences для user_id={user_id}: {e}")
+        return {}
+
+
+def get_user_activity_stats(user_id: int) -> Dict:
+    """
+    Получает статистику активности пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        
+    Returns:
+        Dict: Словарь со статистикой активности
+    """
+    query = """
+        SELECT avg_active_hour, active_days, timezone_offset, interaction_count, last_interaction
+        FROM user_activity_stats
+        WHERE user_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id,))
+                row = cur.fetchone()
+                if row:
+                    return {
+                        'avg_active_hour': row[0],
+                        'active_days': row[1] if row[1] else [],
+                        'timezone_offset': row[2] or 0,
+                        'interaction_count': row[3] or 0,
+                        'last_interaction': row[4]
+                    }
+                return {}
+    except Exception as e:
+        logger.error(f"Ошибка получения activity stats для user_id={user_id}: {e}")
+        return {}
+
+
+def update_user_activity_stats(user_id: int, active_hour: int, active_day: int):
+    """
+    Обновляет статистику активности пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        active_hour: Час активности (0-23)
+        active_day: День недели (0-6, где 0 = понедельник)
+    """
+    query = """
+        INSERT INTO user_activity_stats (user_id, avg_active_hour, active_days, interaction_count, last_interaction, last_updated)
+        VALUES (%s, %s, %s::jsonb, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id) DO UPDATE
+        SET avg_active_hour = (
+            CASE 
+                WHEN user_activity_stats.avg_active_hour IS NULL THEN %s
+                ELSE (user_activity_stats.avg_active_hour + %s) / 2
+            END
+        ),
+        active_days = (
+            CASE 
+                WHEN user_activity_stats.active_days IS NULL OR jsonb_array_length(user_activity_stats.active_days) = 0
+                THEN %s::jsonb
+                ELSE user_activity_stats.active_days || %s::jsonb
+            END
+        ),
+        interaction_count = user_activity_stats.interaction_count + 1,
+        last_interaction = CURRENT_TIMESTAMP,
+        last_updated = CURRENT_TIMESTAMP
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Преобразуем день в JSONB массив
+                import json
+                active_days_json = json.dumps([active_day])
+                cur.execute(query, (user_id, active_hour, active_days_json, active_hour, active_hour, active_days_json, active_days_json))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка обновления activity stats для user_id={user_id}: {e}")
+
+
+def get_cluster_created_at(cluster_id: int):
+    """
+    Получает время создания кластера.
+    
+    Args:
+        cluster_id: ID кластера
+        
+    Returns:
+        datetime: Время создания или None
+    """
+    query = """
+        SELECT created_at
+        FROM clusters
+        WHERE cluster_id = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (cluster_id,))
+                row = cur.fetchone()
+                return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Ошибка получения created_at для cluster_id={cluster_id}: {e}")
+        return None
+
+
+def get_user_liked_clusters(user_id: int, limit: int = 50) -> List[Tuple[int, List[float]]]:
+    """
+    Получает список кластеров, которые пользователь лайкнул, с их embedding.
+    
+    Args:
+        user_id: ID пользователя
+        limit: Максимальное количество кластеров
+        
+    Returns:
+        List[Tuple[int, List[float]]]: Список (cluster_id, embedding)
+    """
+    query = """
+        SELECT DISTINCT c.cluster_id, p.embedding_vec
+        FROM user_posts up
+        JOIN posts p ON p.post_id = up.post_id
+        JOIN cluster_posts cp ON cp.post_id = p.post_id
+        JOIN clusters c ON c.cluster_id = cp.cluster_id
+        WHERE up.user_id = %s
+          AND up.is_liked = TRUE
+          AND p.embedding_vec IS NOT NULL
+        ORDER BY up.read_at DESC
+        LIMIT %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, limit))
+                return [(row[0], list(row[1]) if row[1] else None) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Ошибка получения liked clusters для user_id={user_id}: {e}")
+        return []
+
+
+def add_to_user_queue(user_id: int, cluster_id: int, personal_score: float, priority: int, scheduled_for=None):
+    """
+    Добавляет кластер в очередь пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        cluster_id: ID кластера
+        personal_score: Персональный score
+        priority: Приоритет (1-10)
+        scheduled_for: Запланированное время отправки (опционально)
+    """
+    query = """
+        INSERT INTO user_post_queue (user_id, cluster_id, personal_score, priority, scheduled_for, status)
+        VALUES (%s, %s, %s, %s, %s, 'pending')
+        ON CONFLICT (user_id, cluster_id) DO UPDATE
+        SET personal_score = EXCLUDED.personal_score,
+            priority = EXCLUDED.priority,
+            scheduled_for = EXCLUDED.scheduled_for,
+            status = CASE 
+                WHEN user_post_queue.status = 'pending' THEN 'pending'
+                ELSE EXCLUDED.status
+            END
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, cluster_id, personal_score, priority, scheduled_for))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка добавления в очередь: {e}")
+
+
+def get_user_queue(user_id: int, limit: int = 10, status: str = 'pending') -> List[Dict]:
+    """
+    Получает очередь новостей пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        limit: Максимальное количество записей
+        status: Статус записей ('pending', 'sent', 'skipped', 'expired')
+        
+    Returns:
+        List[Dict]: Список записей очереди
+    """
+    query = """
+        SELECT queue_id, cluster_id, personal_score, priority, scheduled_for, created_at
+        FROM user_post_queue
+        WHERE user_id = %s AND status = %s
+        ORDER BY priority DESC, personal_score DESC, scheduled_for NULLS LAST
+        LIMIT %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, status, limit))
+                return [
+                    {
+                        'queue_id': row[0],
+                        'cluster_id': row[1],
+                        'personal_score': float(row[2]),
+                        'priority': row[3],
+                        'scheduled_for': row[4],
+                        'created_at': row[5]
+                    }
+                    for row in cur.fetchall()
+                ]
+    except Exception as e:
+        logger.error(f"Ошибка получения очереди для user_id={user_id}: {e}")
+        return []
+
+
+def mark_queue_item_sent(user_id: int, cluster_id: int):
+    """
+    Помечает элемент очереди как отправленный.
+    
+    Args:
+        user_id: ID пользователя
+        cluster_id: ID кластера
+    """
+    query = """
+        UPDATE user_post_queue
+        SET status = 'sent', sent_at = CURRENT_TIMESTAMP
+        WHERE user_id = %s AND cluster_id = %s AND status = 'pending'
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, cluster_id))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка пометки очереди как sent: {e}")
+
+
+def get_user_post_count_today(user_id: int) -> int:
+    """
+    Получает количество постов, отправленных пользователю сегодня.
+    
+    Args:
+        user_id: ID пользователя
+        
+    Returns:
+        int: Количество постов
+    """
+    query = """
+        SELECT COALESCE(SUM(post_count), 0)
+        FROM user_post_counters
+        WHERE user_id = %s AND date = CURRENT_DATE
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id,))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as e:
+        logger.error(f"Ошибка получения post count today для user_id={user_id}: {e}")
+        return 0
+
+
+def get_user_post_count_hour(user_id: int, hour: int) -> int:
+    """
+    Получает количество постов, отправленных пользователю в указанный час сегодня.
+    
+    Args:
+        user_id: ID пользователя
+        hour: Час (0-23)
+        
+    Returns:
+        int: Количество постов
+    """
+    query = """
+        SELECT COALESCE(SUM(post_count), 0)
+        FROM user_post_counters
+        WHERE user_id = %s AND date = CURRENT_DATE AND hour = %s
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, hour))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as e:
+        logger.error(f"Ошибка получения post count hour для user_id={user_id}, hour={hour}: {e}")
+        return 0
+
+
+def increment_user_post_counter(user_id: int):
+    """
+    Увеличивает счетчик отправленных постов для пользователя.
+    
+    Args:
+        user_id: ID пользователя
+    """
+    from datetime import datetime
+    current_date = datetime.now().date()
+    current_hour = datetime.now().hour
+    
+    query = """
+        INSERT INTO user_post_counters (user_id, date, hour, post_count)
+        VALUES (%s, %s, %s, 1)
+        ON CONFLICT (user_id, date, hour) DO UPDATE
+        SET post_count = user_post_counters.post_count + 1
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (user_id, current_date, current_hour))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка увеличения post counter для user_id={user_id}: {e}")
+
+
+def get_active_users() -> List[int]:
+    """
+    Получает список активных пользователей (user_id в БД).
+    
+    Returns:
+        List[int]: Список user_id
+    """
+    query = """
+        SELECT user_id
+        FROM users
+        WHERE status = 'active'
+    """
+    try:
+        with _get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Ошибка получения active users: {e}")
+        return []
