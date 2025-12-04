@@ -1,0 +1,83 @@
+@startuml
+!theme plain
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 20
+title Диаграмма последовательности\nОбработка нового поста и генерация сводки (короткая версия)
+
+actor "Telegram Канал" as Channel
+participant "Telethon\nClient" as Telethon
+participant "Handler" as Handler
+participant "AI Utils" as AI
+participant "Ad Filter" as Ad
+participant "Clustering" as Clust
+database "PostgreSQL" as DB
+participant "LLM API" as LLM
+participant "Engagement Processor" as EP
+actor "Bot User" as User
+
+== Получение поста ==
+Channel -> Telethon: Новое сообщение
+Telethon -> Handler: default_handler(event)
+Handler -> DB: Проверка канала
+DB --> Handler: channel_info
+
+alt Есть медиа
+    Handler -> Handler: Скачать медиа
+end
+
+== Эмбеддинг и сохранение ==
+Handler -> AI: embedding(text)
+AI -> LLM: запрос embedding
+LLM --> AI: embedding
+AI --> Handler: embedding
+
+Handler -> DB: Сохранить пост
+DB --> Handler: post_id
+
+== Кластеризация ==
+Handler -> Clust: process_post(post_id, embedding)
+Clust -> DB: Найти ближайший кластер
+DB --> Clust: cluster_info
+
+alt кластер найден
+    Clust -> DB: Добавить пост в кластер
+else Новый кластер
+    Clust -> DB: Создать кластер
+end
+Clust --> Handler: cluster_result
+
+== Фильтр рекламы ==
+Handler -> Ad: Проверить пост
+Ad -> DB: engagement_score
+DB --> Ad: score
+
+alt Серая зона
+    Ad -> LLM: AI-классификация
+    LLM --> Ad: probability
+end
+
+Ad -> DB: Сохранить решение
+
+== Генерация сводки ==
+EP -> DB: Проверить состояние кластеров
+DB --> EP: cluster_state
+
+alt условия выполнены
+    EP -> DB: Получить посты кластера
+    DB --> EP: posts
+
+    EP -> LLM: Создать сводку
+    LLM --> EP: summary
+
+    EP -> DB: Сохранить сводку
+end
+
+== Публикация ==
+EP -> DB: Получить пользователей
+DB --> EP: users
+
+EP -> User: Отправка сводки
+User --> EP: фидбек (опц.)
+EP -> DB: сохранить фидбек
+
+@enduml

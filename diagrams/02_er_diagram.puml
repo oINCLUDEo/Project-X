@@ -1,0 +1,182 @@
+@startuml ER Diagram - База данных новостного агрегатора
+!theme plain
+skinparam linetype ortho
+skinparam roundcorner 20
+skinparam shadowing false
+
+title ER-диаграмма базы данных\nНовостной агрегатор с элементами ИИ
+
+entity "users" as users {
+    * **user_id** : SERIAL <<PK>>
+    --
+    * user_tg_id : BIGINT <<UQ>>
+    username : VARCHAR(255)
+    first_name : VARCHAR(255)
+    full_name : VARCHAR(255)
+    bio : TEXT
+    created_at : TIMESTAMP
+    last_active : TIMESTAMP
+    status : VARCHAR
+    role : VARCHAR
+}
+
+entity "channels" as channels {
+    * **channel_id** : SERIAL <<PK>>
+    --
+    * channel_tg_id : BIGINT <<UQ>>
+    username : VARCHAR(255)
+    * title : VARCHAR(255)
+    description : TEXT
+    subscribers_count : BIGINT
+    is_active : BOOLEAN
+    reputation_score : REAL
+    ad_ratio : REAL
+    quality_score : REAL
+    last_reputation_update : TIMESTAMP
+    created_at : TIMESTAMP
+    last_updated : TIMESTAMP
+}
+
+entity "categories" as categories {
+    * **category_id** : SERIAL <<PK>>
+    --
+    * name : VARCHAR(100) <<UQ>>
+    description : TEXT
+    created_at : TIMESTAMP
+}
+
+entity "posts" as posts {
+    * **post_id** : SERIAL <<PK>>
+    --
+    * channel_tg_id : BIGINT <<FK>>
+    * content : TEXT
+    media_urls : TEXT[]
+    * published_at : TIMESTAMP
+    created_at : TIMESTAMP
+    is_hot : BOOLEAN
+    views_count : INTEGER
+    message_id : BIGINT
+    * embedding : DOUBLE PRECISION[]
+    * embedding_vec : VECTOR(768)
+    reactions_count : INTEGER
+    comments_count : INTEGER
+    forwards_count : INTEGER
+    engagement_score : DOUBLE PRECISION
+    last_engagement_update : TIMESTAMP
+    prev_views_count : INTEGER
+    prev_reactions_count : INTEGER
+    prev_comments_count : INTEGER
+    prev_forwards_count : INTEGER
+    * status : VARCHAR(20)
+}
+
+entity "clusters" as clusters {
+    * **cluster_id** : SERIAL <<PK>>
+    --
+    * created_at : TIMESTAMP
+    * lifetime_minutes : INTEGER
+    main_post_id : INTEGER
+    expires_at : TIMESTAMP
+    cooling_expires_at : TIMESTAMP
+    post_count : INTEGER
+    * status : VARCHAR(20)
+}
+
+entity "cluster_posts" as cluster_posts {
+    * **cluster_id** : INTEGER <<FK>>
+    * **post_id** : INTEGER <<FK>>
+}
+
+entity "user_categories" as user_categories {
+    * **user_id** : INTEGER <<FK>>
+    * **category_id** : INTEGER <<FK>>
+    created_at : TIMESTAMP
+}
+
+entity "channel_categories" as channel_categories {
+    * **channel_id** : INTEGER <<FK>>
+    * **category_id** : INTEGER <<FK>>
+    created_at : TIMESTAMP
+}
+
+entity "user_posts" as user_posts {
+    * **user_id** : INTEGER <<FK>>
+    * **post_id** : INTEGER <<FK>>
+    --
+    is_read : BOOLEAN
+    is_liked : BOOLEAN
+    is_hidden : BOOLEAN
+    read_at : TIMESTAMP
+    created_at : TIMESTAMP
+}
+
+entity "ad_decisions" as ad_decisions {
+    * **decision_id** : SERIAL <<PK>>
+    --
+    * post_id : INTEGER <<FK>>
+    * stage : SMALLINT
+    score : REAL
+    * decision : VARCHAR(16)
+    model_version : VARCHAR(64)
+    features : JSONB
+    created_at : TIMESTAMP
+}
+
+entity "ad_labels" as ad_labels {
+    * **label_id** : SERIAL <<PK>>
+    --
+    * post_id : INTEGER <<FK>> <<UQ>>
+    * label : VARCHAR(16)
+    source : VARCHAR(32)
+    reviewer_tg_id : BIGINT
+    notes : TEXT
+    created_at : TIMESTAMP
+}
+
+entity "generated_articles" as generated_articles {
+    * **id** : SERIAL <<PK>>
+    --
+    * cluster_id : INTEGER <<FK>>
+    * mode : VARCHAR(2)
+    model_name : VARCHAR(128)
+    * text : TEXT
+    facts_json : JSONB
+    created_at : TIMESTAMP
+}
+
+entity "system_params" as system_params {
+    * **param_key** : VARCHAR(128) <<PK>>
+    --
+    * param_value : TEXT
+    updated_at : TIMESTAMP
+}
+
+' Связи
+channels ||--o{ posts : "публикует"
+categories ||--o{ user_categories : "подписка"
+categories ||--o{ channel_categories : "категория"
+users ||--o{ user_categories : "подписывается"
+users ||--o{ user_posts : "взаимодействует"
+posts ||--o{ user_posts : "просматривается"
+posts ||--o{ cluster_posts : "входит в"
+clusters ||--o{ cluster_posts : "содержит"
+posts ||--o{ ad_decisions : "классифицируется"
+posts ||--o{ ad_labels : "размечается"
+clusters ||--o{ generated_articles : "генерирует"
+
+note right of posts
+  **Векторные индексы:**
+  - HNSW индекс для embedding_vec
+  - Индекс для поиска похожих новостей
+end note
+
+note right of clusters
+  **Жизненный цикл:**
+  - active (активен)
+  - cooling (охлаждение)
+  - expired (истек)
+  - ad (реклама)
+end note
+
+@enduml
+

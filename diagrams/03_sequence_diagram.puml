@@ -1,0 +1,190 @@
+@startuml Sequence Diagram - Обработка нового поста
+!theme plain
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 20
+skinparam maxmessagesize 60
+
+title Диаграмма последовательности\nОбработка нового поста и генерация сводки
+
+actor "Telegram\nКанал" as Channel
+participant "Telethon\nClient" as Telethon
+participant "Default\nHandler" as Handler
+participant "Handler\nUtils" as Utils
+participant "Embedding\nGenerator" as Embedding
+database "PostgreSQL\nDatabase" as DB
+participant "Clustering\nModule" as Clustering
+participant "Ad Filter\nModule" as AdFilter
+participant "News\nSynthesizer" as Synthesizer
+participant "LLM API\n(OpenAI)" as LLM
+actor "Пользователь\nTelegram Bot" as User
+
+== Получение нового поста ==
+
+Channel -> Telethon: Новое сообщение
+activate Telethon
+Telethon -> Handler: Вызов default_handler(event)
+activate Handler
+
+Handler -> Handler: Проверка grouped_id
+Handler -> Utils: validate_post(event)
+activate Utils
+Utils -> DB: Проверка канала и категорий
+activate DB
+DB --> Utils: Информация о канале
+deactivate DB
+Utils --> Handler: channel_id, categories, target_users
+deactivate Utils
+
+alt Есть медиа-файлы
+    Handler -> Handler: Скачать медиа в media/
+end
+
+== Создание эмбеддинга и сохранение ==
+
+Handler -> Utils: process_ai_and_clustering()
+activate Utils
+Utils -> Embedding: get_embedding(text)
+activate Embedding
+Embedding -> Embedding: Генерация 768-dim вектора
+Embedding --> Utils: embedding vector
+deactivate Embedding
+
+Utils -> DB: add_post(content, embedding_vec)
+activate DB
+DB -> DB: Сохранение поста
+DB -> DB: Создание HNSW индекса
+DB --> Utils: post_id
+deactivate DB
+
+== Кластеризация ==
+
+Utils -> Clustering: process_post_and_cluster(embedding, post_id)
+activate Clustering
+Clustering -> DB: find_nearest_active_cluster(embedding)
+activate DB
+DB -> DB: ANN поиск (HNSW индекс)
+DB --> Clustering: cluster_id, similarity
+deactivate DB
+
+alt similarity >= 0.69 (похожий кластер найден)
+    Clustering -> DB: add_post_to_cluster(cluster_id, post_id)
+    activate DB
+    DB -> DB: Обновление post_count
+    DB --> Clustering: Успех
+    deactivate DB
+    Clustering --> Utils: {status: "added", cluster_id}
+else Новый кластер
+    Clustering -> DB: create_new_cluster(post_id)
+    activate DB
+    DB -> DB: Создание кластера с lifetime
+    DB --> Clustering: new_cluster_id
+    deactivate DB
+    Clustering --> Utils: {status: "new_cluster", cluster_id}
+end
+deactivate Clustering
+
+== Фильтрация рекламы ==
+
+Utils -> AdFilter: process_post_for_ad_check(post_id)
+activate AdFilter
+
+AdFilter -> AdFilter: Stage 1: Rule-based фильтр
+AdFilter -> AdFilter: Проверка паттернов (ERID, #реклама)
+AdFilter -> DB: compute_ad_score()
+activate DB
+DB -> DB: Получение engagement_score
+DB --> AdFilter: ad_score
+deactivate DB
+
+alt ad_score >= threshold
+    AdFilter -> DB: update_post_status("ad")
+    activate DB
+    DB --> AdFilter: Статус обновлен
+    deactivate DB
+    AdFilter --> Utils: is_ad = True
+else ad_score в серой зоне
+    AdFilter -> AdFilter: Stage 2: AI-классификация
+    AdFilter -> LLM: predict_ad_probability(text)
+    activate LLM
+    LLM --> AdFilter: ai_probability
+    deactivate LLM
+    AdFilter -> DB: insert_ad_decision(stage=2, decision)
+    activate DB
+    DB --> AdFilter: Решение сохранено
+    deactivate DB
+    AdFilter --> Utils: is_ad = False/True
+end
+
+AdFilter -> DB: insert_ad_decision(stage=1, decision)
+activate DB
+DB --> AdFilter: Лог сохранен
+deactivate DB
+deactivate AdFilter
+
+Utils --> Handler: Обработка завершена
+deactivate Utils
+deactivate Handler
+
+== Генерация сводки (асинхронно, когда кластер готов) ==
+
+DB -> Synthesizer: Триггер: кластер готов к генерации
+activate Synthesizer
+Synthesizer -> DB: get_cluster_posts_full(cluster_id)
+activate DB
+DB --> Synthesizer: Список постов кластера
+deactivate DB
+
+Synthesizer -> Synthesizer: select_anchor_post()\n(по heat_score)
+Synthesizer -> Synthesizer: compute_novelty_score()
+Synthesizer -> Synthesizer: compute_target_paragraphs()
+
+Synthesizer -> Synthesizer: build_prompt_mode_a/b()
+
+Synthesizer -> LLM: synthesize_news(cluster_posts, mode)
+activate LLM
+LLM -> LLM: Генерация текста сводки
+LLM --> Synthesizer: Генерированный текст
+deactivate LLM
+
+Synthesizer -> Synthesizer: normalize_html_for_telegram()
+Synthesizer -> DB: save_generated_article(cluster_id, text)
+activate DB
+DB --> Synthesizer: Статья сохранена
+deactivate DB
+deactivate Synthesizer
+
+== Публикация пользователям ==
+
+DB -> Utils: engagement_publisher_task()
+activate Utils
+Utils -> DB: get_clusters_ready_for_publishing()
+activate DB
+DB --> Utils: Список готовых кластеров
+deactivate DB
+
+Utils -> DB: get_target_users_for_cluster()
+activate DB
+DB --> Utils: Список пользователей
+deactivate DB
+
+Utils -> User: Отправка сгенерированной сводки
+activate User
+User --> Utils: Получено
+deactivate User
+
+Utils -> DB: record_user_feedback() (если есть)
+activate DB
+DB --> Utils: Фидбек сохранен
+deactivate DB
+deactivate Utils
+deactivate Telethon
+
+note over DB
+  **Параллельные процессы:**
+  - Обновление engagement метрик
+  - Обновление репутации каналов
+  - Управление жизненным циклом кластеров
+end note
+
+@enduml
+

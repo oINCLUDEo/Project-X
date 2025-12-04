@@ -1,0 +1,69 @@
+@startuml Use Case Diagram - Новостной агрегатор
+!theme plain
+skinparam componentStyle rectangle
+skinparam usecase {
+    BackgroundColor #E1F5FE
+    BorderColor #01579B
+}
+
+title Диаграмма вариантов использования\nНовостной агрегатор с элементами ИИ
+
+actor "Пользователь" as User #LightBlue
+actor "Администратор" as Admin #LightGreen
+actor "Система Telegram" as Telegram #LightYellow
+
+rectangle "Новостной агрегатор" {
+    package "Функции пользователя" {
+        usecase "Зарегистрироваться" as UC1
+        usecase "Получать новости" as UC2
+        usecase "Оценивать новости\n(лайк/дизлайк)" as UC3
+        usecase "Просматривать профиль" as UC4
+        usecase "Настраивать категории" as UC5
+        usecase "Проходить онбординг" as UC6
+    }
+    
+    package "Функции администратора" {
+        usecase "Просматривать информацию\nо посте (/info)" as UC7
+        usecase "Размечать посты\n(/label)" as UC8
+        usecase "Мониторить систему" as UC9
+        usecase "Управлять каналами" as UC10
+        usecase "Настраивать параметры" as UC11
+    }
+    
+    package "Системные функции" {
+        usecase "Собирать новости\nиз каналов" as UC12
+        usecase "Фильтровать рекламу" as UC13
+        usecase "Кластеризовать новости" as UC14
+        usecase "Генерировать сводки" as UC15
+        usecase "Рассчитывать метрики" as UC16
+        usecase "Персонализировать контент" as UC17
+    }
+}
+
+User --> UC1
+User --> UC2
+User --> UC3
+User --> UC4
+User --> UC5
+User --> UC6
+
+Admin --> UC7
+Admin --> UC8
+Admin --> UC9
+Admin --> UC10
+Admin --> UC11
+
+Telegram --> UC12
+UC12 --> UC13
+UC13 --> UC14
+UC14 --> UC15
+UC15 --> UC17
+
+UC12 --> UC16
+UC16 --> UC17
+UC17 --> UC2
+
+UC13 ..> UC8 : <<extends>>
+
+@enduml
+
